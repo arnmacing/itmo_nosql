@@ -9,13 +9,12 @@ public final class App {
     private static final Logger log = LoggerFactory.getLogger(App.class);
 
     private static final String PORT_ENV = "APP_PORT";
-    private static final int DEFAULT_PORT = 8080;
 
     private record HealthResponse(String status) {
     }
 
     public static void main(String[] args) {
-        int port = envPort(PORT_ENV, DEFAULT_PORT);
+        int port = requirePort(PORT_ENV);
 
         Javalin app = Javalin.create();
 
@@ -27,16 +26,25 @@ public final class App {
         log.info("Service started on port {}", port);
     }
 
-    private static int envPort(String name, int fallback) {
+    private static int requirePort(String name) {
         String raw = System.getenv(name);
+
         if (raw == null || raw.isBlank()) {
-            return fallback;
+            log.error("Environment variable {} is required (example: {}=8080).", name, name);
+            System.exit(1);
         }
+
         try {
             int port = Integer.parseInt(raw.trim());
-            return (port >= 1 && port <= 65535) ? port : fallback;
+            if (port < 1 || port > 65535) {
+                log.error("Invalid {}={}.", name, raw);
+                System.exit(1);
+            }
+            return port;
         } catch (NumberFormatException e) {
-            return fallback;
+            log.error("Invalid {}={}.", name, raw);
+            System.exit(1);
+            return -1;
         }
     }
 }

@@ -2,7 +2,7 @@ services:
   app:
     build:
       context: .
-    environment:
-      APP_PORT: ${APP_PORT}
+    env_file:
+      - .env.local
     ports:
-      - "${APP_PORT}:${APP_PORT}"
+      - "${APP_HOST}:${APP_PORT}:${APP_PORT}"
