@@ -7,6 +7,27 @@
 	},
 	"item": [
 		{
+			"name": "http://localhost:8080/session",
+			"protocolProfileBehavior": {
+				"disableBodyPruning": true
+			},
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": "http://localhost:8080/session"
+			},
+			"response": []
+		},
+		{
 			"name": "http://localhost:8080/health",
 			"protocolProfileBehavior": {
 				"disableBodyPruning": true

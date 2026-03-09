@@ -4,5 +4,14 @@ services:
       context: .
     env_file:
       - .env.local
+    depends_on:
+      - redis
     ports:
-      - "${APP_HOST}:${APP_PORT}:${APP_PORT}"
+      - "${APP_PORT}:${APP_PORT}"
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --save "" --appendonly no
+    env_file:
+      - .env.local
+    ports:
+      - "${REDIS_PORT}:6379"
