@@ -46,7 +46,7 @@ public final class App {
     private static final String REDIS_PORT_ENV = "REDIS_PORT";
     private static final String REDIS_PASSWORD_ENV = "REDIS_PASSWORD";
     private static final String REDIS_DB_ENV = "REDIS_DB";
-    private static final String MONGODB_DATABASE_ENV = "MONGODB_DATABSE";
+    private static final String MONGODB_DATABASE_ENV = "MONGODB_DATABASE";
     private static final String MONGODB_DATABASE_FALLBACK_ENV = "MONGODB_DATABASE";
     private static final String MONGODB_USER_ENV = "MONGODB_USER";
     private static final String MONGODB_PASSWORD_ENV = "MONGODB_PASSWORD";
