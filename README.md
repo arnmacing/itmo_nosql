@@ -1,4 +1,4 @@
-HTTP-сервис с `GET /health` и анонимными server-side сессиями в Redis через `POST /session`.
+HTTP-сервис с Redis-сессиями и MongoDB для пользователей и событий.
 
 > Все настройки проекта берутся **только** из `.env.local`.
 
@@ -11,43 +11,42 @@ REDIS_HOST=redis
 REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
+
+MONGODB_DATABSE=eventhub
+MONGODB_USER=eventhub
+MONGODB_PASSWORD=eventhub
+MONGODB_HOST=mongodb
+MONGODB_PORT=27017
 ```
 
 ## Запуск
-
-Запуск одной командой:
 
 ```bash
 make run
 ```
 
-Проверка, что сервис поднялся:
+## Endpoint-ы
 
-```bash
-curl http://localhost:8080/health
-# ожидается: {"status":"ok"}
-```
+- `GET /health` – healthcheck, без изменений состояния в Redis.
+- `POST /session` – создание/обновление анонимной сессии.
+- `POST /users` – регистрация пользователя, создание новой сессии с `user_id`.
+- `POST /auth/login` – вход.
+- `POST /auth/logout` – выход, удаление сессии и cookie.
+- `POST /events` – создание события (только авторизованный пользователь).
+- `GET /events` – просмотр событий.
 
-Создать/обновить сессию:
+## MongoDB коллекции и индексы
 
-```bash
-curl -i -X POST http://localhost:8080/session
-```
+- `users`
+    - поля: `full_name`, `username`, `password_hash`
+    - индекс: `username` unique
+- `events`
+    - поля: `title`, `description`, `location.address`, `created_at`, `created_by`, `started_at`, `finished_at`
+    - индексы: `title` unique, `(title, created_by)`, `created_by`
 
-## Поведение endpoint-ов
-
-- `GET /health`
-  - Всегда `200 OK` и `{"status":"ok"}`.
-  - Не создаёт сессию и не обновляет TTL в Redis.
-  - Если пришла Cookie `X-Session-Id` валидного формата, возвращает её обратно в `Set-Cookie`.
-- `POST /session`
-  - Без cookie создаёт новую сессию в Redis (`Hash` по ключу `sid:{sid}` с `created_at` и `updated_at`) и возвращает `201 Created`.
-  - С существующей cookie обновляет `updated_at` и TTL, возвращает `200 OK`.
-  - С невалидной/просроченной cookie создаёт новую сессию, возвращает `201 Created`.
-
-## Формат сессии в Redis
+## Redis сессии
 
 - Ключ: `sid:{session_id}`
 - Тип: `Hash`
-- Поля: `created_at`, `updated_at` (RFC3339)
-- TTL берётся из `APP_USER_SESSION_TTL`
+- Поля: `created_at`, `updated_at`, `user_id`
+- TTL: `APP_USER_SESSION_TTL`
