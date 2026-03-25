@@ -8,10 +8,14 @@ if (!username || !password) {
 
 const appDb = db.getSiblingDB(dbName);
 const existingUser = appDb.getUser(username);
+const roles = [{ role: "dbOwner", db: dbName }];
+
 if (!existingUser) {
     appDb.createUser({
         user: username,
         pwd: password,
-        roles: [{ role: "readWrite", db: dbName }]
+        roles
     });
+} else {
+    appDb.updateUser(username, { roles });
 }
