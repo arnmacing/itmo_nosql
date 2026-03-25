@@ -24,5 +24,8 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: "${MONGODB_USER}"
       MONGO_INITDB_ROOT_PASSWORD: "${MONGODB_PASSWORD}"
+      MONGO_INITDB_DATABASE: "${MONGODB_DATABASE}"
+    volumes:
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/01-mongo-init.js:ro
     ports:
       - "${MONGODB_PORT}:${MONGODB_PORT}"
