@@ -284,10 +284,18 @@ public final class App {
 
     private static void handleLogout(Context ctx, SessionStore sessionStore) {
         String requestSid = readValidSidFromCookie(ctx);
-        if (requestSid != null) {
-            sessionStore.deleteSession(requestSid);
+        if (requestSid == null) {
+            ctx.status(401);
+            return;
         }
 
+        SessionInfo sessionInfo = sessionStore.readSession(requestSid);
+        if (!sessionInfo.exists() || isBlank(sessionInfo.userId())) {
+            ctx.status(401);
+            return;
+        }
+
+        sessionStore.deleteSession(requestSid);
         clearSessionCookie(ctx, requestSid);
         ctx.status(204);
     }
