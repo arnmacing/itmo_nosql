@@ -1062,6 +1062,12 @@ public final class App {
             usersCollection.createIndex(Indexes.ascending("username"), new IndexOptions().unique(true));
             usersCollection.createIndex(Indexes.ascending("full_name"));
             eventsCollection.createIndex(Indexes.ascending("title"));
+            eventsCollection.createIndex(
+                    Indexes.compoundIndex(
+                            Indexes.ascending("title"),
+                            Indexes.ascending("created_by")
+                    )
+            );
             eventsCollection.createIndex(Indexes.ascending("created_by"));
             eventsCollection.createIndex(Indexes.ascending("category"));
             eventsCollection.createIndex(Indexes.ascending("price"));
