@@ -1,5 +1,7 @@
 package healthcheck;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mongodb.ErrorCategory;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoCredential;
@@ -28,12 +30,16 @@ import redis.clients.jedis.JedisPooled;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 public final class App {
@@ -55,6 +61,16 @@ public final class App {
     private static final String SESSION_COOKIE_NAME = "X-Session-Id";
     private static final Pattern SID_PATTERN = Pattern.compile("^[0-9a-f]{32}$");
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final DateTimeFormatter DATE_FILTER_FORMATTER = DateTimeFormatter.BASIC_ISO_DATE
+            .withResolverStyle(ResolverStyle.STRICT);
+    private static final Set<String> VALID_EVENT_CATEGORIES = Set.of(
+            "meetup",
+            "concert",
+            "exhibition",
+            "party",
+            "other"
+    );
 
     private static final String CREATE_SESSION_SCRIPT = """
             if redis.call('EXISTS', KEYS[1]) == 1 then
@@ -98,6 +114,8 @@ public final class App {
     private record EventResponse(
             String id,
             String title,
+            String category,
+            Integer price,
             String description,
             EventLocation location,
             String created_at,
@@ -106,7 +124,11 @@ public final class App {
             String finished_at
     ) {}
 
-    private record EventLocation(String address) {}
+    private record EventLocation(String city, String address) {}
+
+    private record UsersListResponse(List<UserResponse> users, int count) {}
+
+    private record UserResponse(String id, String full_name, String username) {}
 
     private record UserCreateRequest(String full_name, String username, String password) {}
 
@@ -118,6 +140,38 @@ public final class App {
             String started_at,
             String finished_at,
             String description
+    ) {}
+
+    private record EventPatchRequest(
+            boolean hasCategory,
+            String category,
+            boolean hasPrice,
+            Integer price,
+            boolean hasCity,
+            String city
+    ) {}
+
+    private record EventFilters(
+            String id,
+            String title,
+            String category,
+            Integer priceFrom,
+            Integer priceTo,
+            String city,
+            LocalDate dateFrom,
+            LocalDate dateTo,
+            String userId,
+            String username,
+            String address,
+            Integer limit,
+            int offset
+    ) {}
+
+    private record UserFilters(
+            String id,
+            String name,
+            Integer limit,
+            int offset
     ) {}
 
     private record SessionInfo(boolean exists, String userId) {
@@ -161,7 +215,12 @@ public final class App {
         app.post("/auth/login", ctx -> handleLogin(ctx, sessionStore, mongoStore, sessionTtlSeconds));
         app.post("/auth/logout", ctx -> handleLogout(ctx, sessionStore));
         app.post("/events", ctx -> handleCreateEvent(ctx, sessionStore, mongoStore, sessionTtlSeconds));
+        app.patch("/events/{id}", ctx -> handlePatchEvent(ctx, sessionStore, mongoStore, sessionTtlSeconds));
+        app.get("/events/{id}", ctx -> handleGetEvent(ctx, mongoStore, sessionTtlSeconds));
         app.get("/events", ctx -> handleListEvents(ctx, mongoStore, sessionTtlSeconds));
+        app.get("/users/{id}/events", ctx -> handleListUserEvents(ctx, mongoStore, sessionTtlSeconds));
+        app.get("/users/{id}", ctx -> handleGetUser(ctx, mongoStore, sessionTtlSeconds));
+        app.get("/users", ctx -> handleListUsers(ctx, mongoStore, sessionTtlSeconds));
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             app.stop();
@@ -365,31 +424,291 @@ public final class App {
         ctx.status(201).json(new EventIdResponse(result.eventId()));
     }
 
+    private static void handlePatchEvent(Context ctx, SessionStore sessionStore, MongoStore mongoStore, int sessionTtlSeconds) {
+        String requestSid = readValidSidFromCookie(ctx);
+        if (requestSid == null) {
+            ctx.status(401);
+            return;
+        }
+
+        maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
+
+        SessionInfo sessionInfo = sessionStore.readSession(requestSid);
+        if (!sessionInfo.exists()) {
+            ctx.status(401);
+            return;
+        }
+
+        touchSessionIfExists(sessionStore, requestSid);
+
+        if (isBlank(sessionInfo.userId())) {
+            ctx.status(401);
+            return;
+        }
+
+        EventPatchRequest patchRequest;
+        try {
+            patchRequest = parseEventPatchRequest(ctx);
+        } catch (IllegalArgumentException e) {
+            ctx.status(400).json(invalidFieldMessage(e.getMessage()));
+            return;
+        }
+
+        String eventId = trimToEmpty(ctx.pathParam("id"));
+        if (isBlank(eventId)) {
+            ctx.status(404).json(new MessageResponse("Not found. Be sure that event exists and you are the organizer"));
+            return;
+        }
+
+        boolean updated = mongoStore.updateEventByOrganizer(eventId, sessionInfo.userId(), patchRequest);
+        if (!updated) {
+            ctx.status(404).json(new MessageResponse("Not found. Be sure that event exists and you are the organizer"));
+            return;
+        }
+
+        ctx.status(204);
+    }
+
+    private static void handleGetEvent(Context ctx, MongoStore mongoStore, int sessionTtlSeconds) {
+        String sid = readValidSidFromCookie(ctx);
+        maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String eventId = trimToEmpty(ctx.pathParam("id"));
+        EventResponse event = mongoStore.getEventById(eventId);
+        if (event == null) {
+            ctx.status(404).json(new MessageResponse("Not found"));
+            return;
+        }
+
+        ctx.json(event);
+    }
+
     private static void handleListEvents(Context ctx, MongoStore mongoStore, int sessionTtlSeconds) {
         String sid = readValidSidFromCookie(ctx);
         maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
 
-        Integer limit;
+        EventFilters filters;
         try {
-            limit = parseUnsignedQueryInt(ctx.queryParam("limit"));
+            filters = parseEventFilters(ctx);
         } catch (IllegalArgumentException e) {
-            ctx.status(400).json(invalidParameterMessage("limit"));
+            ctx.status(400).json(invalidFieldMessage(e.getMessage()));
             return;
         }
 
-        Integer offsetRaw;
+        List<EventResponse> events = mongoStore.listEvents(filters);
+        ctx.json(new EventsListResponse(events, events.size()));
+    }
+
+    private static void handleListUsers(Context ctx, MongoStore mongoStore, int sessionTtlSeconds) {
+        String sid = readValidSidFromCookie(ctx);
+        maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        UserFilters filters;
         try {
-            offsetRaw = parseUnsignedQueryInt(ctx.queryParam("offset"));
+            filters = parseUserFilters(ctx);
         } catch (IllegalArgumentException e) {
-            ctx.status(400).json(invalidParameterMessage("offset"));
+            ctx.status(400).json(invalidFieldMessage(e.getMessage()));
             return;
         }
 
+        List<UserResponse> users = mongoStore.listUsers(filters);
+        ctx.json(new UsersListResponse(users, users.size()));
+    }
+
+    private static void handleGetUser(Context ctx, MongoStore mongoStore, int sessionTtlSeconds) {
+        String sid = readValidSidFromCookie(ctx);
+        maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String userId = trimToEmpty(ctx.pathParam("id"));
+        UserResponse user = mongoStore.getUserById(userId);
+        if (user == null) {
+            ctx.status(404).json(new MessageResponse("Not found"));
+            return;
+        }
+
+        ctx.json(user);
+    }
+
+    private static void handleListUserEvents(Context ctx, MongoStore mongoStore, int sessionTtlSeconds) {
+        String sid = readValidSidFromCookie(ctx);
+        maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String userId = trimToEmpty(ctx.pathParam("id"));
+        if (!mongoStore.userExists(userId)) {
+            ctx.status(404).json(new MessageResponse("User not found"));
+            return;
+        }
+
+        EventFilters filters;
+        try {
+            EventFilters baseFilters = parseEventFilters(ctx);
+            filters = new EventFilters(
+                    baseFilters.id(),
+                    baseFilters.title(),
+                    baseFilters.category(),
+                    baseFilters.priceFrom(),
+                    baseFilters.priceTo(),
+                    baseFilters.city(),
+                    baseFilters.dateFrom(),
+                    baseFilters.dateTo(),
+                    userId,
+                    null,
+                    baseFilters.address(),
+                    baseFilters.limit(),
+                    baseFilters.offset()
+            );
+        } catch (IllegalArgumentException e) {
+            ctx.status(400).json(invalidFieldMessage(e.getMessage()));
+            return;
+        }
+
+        List<EventResponse> events = mongoStore.listEvents(filters);
+        ctx.json(new EventsListResponse(events, events.size()));
+    }
+
+    private static EventFilters parseEventFilters(Context ctx) {
+        String id = readOptionalQueryString(ctx, "id");
+        String title = readOptionalQueryString(ctx, "title");
+        String category = readOptionalQueryString(ctx, "category");
+        String city = readOptionalQueryString(ctx, "city");
+        String userId = readOptionalQueryString(ctx, "user_id");
+        String username = readOptionalQueryString(ctx, "user");
+        String address = readOptionalQueryString(ctx, "address");
+
+        if (category != null && !VALID_EVENT_CATEGORIES.contains(category)) {
+            throw new IllegalArgumentException("category");
+        }
+
+        Integer priceFrom = parseUnsignedQueryInt(ctx.queryParam("price_from"), "price_from");
+        Integer priceTo = parseUnsignedQueryInt(ctx.queryParam("price_to"), "price_to");
+        if (priceFrom != null && priceTo != null && priceFrom > priceTo) {
+            throw new IllegalArgumentException("price_to");
+        }
+
+        LocalDate dateFrom = parseDateQuery(ctx.queryParam("date_from"), "date_from");
+        if (dateFrom == null) {
+            dateFrom = parseDateQuery(ctx.queryParam("started_date_from"), "started_date_from");
+        }
+
+        LocalDate dateTo = parseDateQuery(ctx.queryParam("date_to"), "date_to");
+        if (dateTo == null) {
+            dateTo = parseDateQuery(ctx.queryParam("started_date_to"), "started_date_to");
+        }
+
+        if (dateFrom != null && dateTo != null && dateFrom.isAfter(dateTo)) {
+            throw new IllegalArgumentException("date_to");
+        }
+
+        Integer limit = parseUnsignedQueryInt(ctx.queryParam("limit"), "limit");
+        Integer offsetRaw = parseUnsignedQueryInt(ctx.queryParam("offset"), "offset");
         int offset = offsetRaw == null ? 0 : offsetRaw;
 
-        String titleFilter = ctx.queryParam("title");
-        List<EventResponse> events = mongoStore.listEvents(titleFilter, limit, offset);
-        ctx.json(new EventsListResponse(events, events.size()));
+        return new EventFilters(
+                id,
+                title,
+                category,
+                priceFrom,
+                priceTo,
+                city,
+                dateFrom,
+                dateTo,
+                userId,
+                username,
+                address,
+                limit,
+                offset
+        );
+    }
+
+    private static UserFilters parseUserFilters(Context ctx) {
+        String id = readOptionalQueryString(ctx, "id");
+        String name = readOptionalQueryString(ctx, "name");
+        Integer limit = parseUnsignedQueryInt(ctx.queryParam("limit"), "limit");
+        Integer offsetRaw = parseUnsignedQueryInt(ctx.queryParam("offset"), "offset");
+        int offset = offsetRaw == null ? 0 : offsetRaw;
+
+        return new UserFilters(id, name, limit, offset);
+    }
+
+    private static EventPatchRequest parseEventPatchRequest(Context ctx) {
+        JsonNode rootNode;
+        try {
+            rootNode = OBJECT_MAPPER.readTree(ctx.body());
+        } catch (Exception e) {
+            throw new IllegalArgumentException("category");
+        }
+
+        if (rootNode == null || !rootNode.isObject()) {
+            throw new IllegalArgumentException("category");
+        }
+
+        boolean hasCategory = false;
+        String category = null;
+        boolean hasPrice = false;
+        Integer price = null;
+        boolean hasCity = false;
+        String city = null;
+
+        if (rootNode.has("category")) {
+            JsonNode categoryNode = rootNode.get("category");
+            if (categoryNode == null || !categoryNode.isTextual()) {
+                throw new IllegalArgumentException("category");
+            }
+
+            category = categoryNode.asText().trim();
+            if (!VALID_EVENT_CATEGORIES.contains(category)) {
+                throw new IllegalArgumentException("category");
+            }
+            hasCategory = true;
+        }
+
+        if (rootNode.has("price")) {
+            JsonNode priceNode = rootNode.get("price");
+            if (priceNode == null || !priceNode.isIntegralNumber()) {
+                throw new IllegalArgumentException("price");
+            }
+
+            long parsedPrice = priceNode.longValue();
+            if (parsedPrice < 0 || parsedPrice > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("price");
+            }
+
+            hasPrice = true;
+            price = (int) parsedPrice;
+        }
+
+        if (rootNode.has("city")) {
+            JsonNode cityNode = rootNode.get("city");
+            if (cityNode == null || !cityNode.isTextual()) {
+                throw new IllegalArgumentException("city");
+            }
+
+            hasCity = true;
+            city = cityNode.asText().trim();
+        }
+
+        return new EventPatchRequest(
+                hasCategory,
+                category,
+                hasPrice,
+                price,
+                hasCity,
+                city
+        );
+    }
+
+    private static String readOptionalQueryString(Context ctx, String name) {
+        String value = ctx.queryParam(name);
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException(name);
+        }
+
+        return trimmed;
     }
 
     private static void maybeSetSessionCookie(Context ctx, String sid, int ttlSeconds) {
@@ -417,10 +736,6 @@ public final class App {
         return new MessageResponse("invalid \"" + field + "\" field");
     }
 
-    private static MessageResponse invalidParameterMessage(String field) {
-        return new MessageResponse("invalid \"" + field + "\" parameter");
-    }
-
     private static boolean isValidRfc3339(String value) {
         try {
             OffsetDateTime.parse(value);
@@ -430,14 +745,42 @@ public final class App {
         }
     }
 
-    private static Integer parseUnsignedQueryInt(String value) {
+    private static LocalDate parseDateQuery(String value, String fieldName) {
         if (value == null) {
             return null;
         }
 
-        long parsed = Long.parseLong(value.trim());
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
+        try {
+            return LocalDate.parse(trimmed, DATE_FILTER_FORMATTER);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(fieldName);
+        }
+    }
+
+    private static Integer parseUnsignedQueryInt(String value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
+        long parsed;
+        try {
+            parsed = Long.parseLong(trimmed);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
         if (parsed < 0 || parsed > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("invalid query integer");
+            throw new IllegalArgumentException(fieldName);
         }
 
         return (int) parsed;
@@ -717,9 +1060,13 @@ public final class App {
 
         private void ensureIndexes() {
             usersCollection.createIndex(Indexes.ascending("username"), new IndexOptions().unique(true));
-            eventsCollection.createIndex(Indexes.ascending("title"), new IndexOptions().unique(true));
-            eventsCollection.createIndex(Indexes.compoundIndex(Indexes.ascending("title"), Indexes.ascending("created_by")));
+            usersCollection.createIndex(Indexes.ascending("full_name"));
+            eventsCollection.createIndex(Indexes.ascending("title"));
             eventsCollection.createIndex(Indexes.ascending("created_by"));
+            eventsCollection.createIndex(Indexes.ascending("category"));
+            eventsCollection.createIndex(Indexes.ascending("price"));
+            eventsCollection.createIndex(Indexes.ascending("location.city"));
+            eventsCollection.createIndex(Indexes.ascending("started_at"));
         }
 
         private UserCreationResult createUser(String fullName, String username, String password) {
@@ -731,8 +1078,7 @@ public final class App {
 
             try {
                 usersCollection.insertOne(document);
-                ObjectId id = document.getObjectId("_id");
-                return UserCreationResult.created(id.toHexString());
+                return UserCreationResult.created(documentIdAsString(document.get("_id")));
             } catch (MongoWriteException e) {
                 if (isDuplicateKey(e)) {
                     return UserCreationResult.conflict();
@@ -763,8 +1109,7 @@ public final class App {
                 return null;
             }
 
-            ObjectId userId = user.getObjectId("_id");
-            return userId == null ? null : userId.toHexString();
+            return documentIdAsString(user.get("_id"));
         }
 
         private EventCreationResult createEvent(
@@ -785,8 +1130,7 @@ public final class App {
 
             try {
                 eventsCollection.insertOne(event);
-                ObjectId id = event.getObjectId("_id");
-                return EventCreationResult.created(id.toHexString());
+                return EventCreationResult.created(documentIdAsString(event.get("_id")));
             } catch (MongoWriteException e) {
                 if (isDuplicateKey(e)) {
                     return EventCreationResult.conflict();
@@ -795,39 +1139,307 @@ public final class App {
             }
         }
 
-        private List<EventResponse> listEvents(String titleFilter, Integer limit, int offset) {
-            Bson filter = new Document();
-            if (!isBlank(titleFilter)) {
-                filter = Filters.regex("title", Pattern.compile(Pattern.quote(titleFilter.trim()), Pattern.CASE_INSENSITIVE));
+        private boolean updateEventByOrganizer(String eventId, String organizerId, EventPatchRequest request) {
+            Bson filter = Filters.and(
+                    buildIdFilter(eventId),
+                    Filters.eq("created_by", organizerId)
+            );
+
+            Document setUpdates = new Document();
+            if (request.hasCategory()) {
+                setUpdates.append("category", request.category());
+            }
+            if (request.hasPrice()) {
+                setUpdates.append("price", request.price());
+            }
+            if (request.hasCity() && !isBlank(request.city())) {
+                setUpdates.append("location.city", request.city());
             }
 
+            Document unsetUpdates = new Document();
+            if (request.hasCity() && isBlank(request.city())) {
+                unsetUpdates.append("location.city", "");
+            }
+
+            if (setUpdates.isEmpty() && unsetUpdates.isEmpty()) {
+                return eventsCollection.find(filter).first() != null;
+            }
+
+            Document update = new Document();
+            if (!setUpdates.isEmpty()) {
+                update.append("$set", setUpdates);
+            }
+            if (!unsetUpdates.isEmpty()) {
+                update.append("$unset", unsetUpdates);
+            }
+
+            return eventsCollection.updateOne(filter, update).getMatchedCount() > 0;
+        }
+
+        private EventResponse getEventById(String eventId) {
+            if (isBlank(eventId)) {
+                return null;
+            }
+
+            Document document = eventsCollection.find(buildIdFilter(eventId)).first();
+            return document == null ? null : mapEvent(document);
+        }
+
+        private List<EventResponse> listEvents(EventFilters filters) {
+            Bson filter = buildEventFilter(filters);
             FindIterable<Document> cursor = eventsCollection.find(filter);
-            if (offset > 0) {
-                cursor = cursor.skip(offset);
-            }
 
-            if (limit != null) {
-                cursor = cursor.limit(limit);
-            }
-
-            List<EventResponse> events = new ArrayList<>();
+            List<EventResponse> filteredEvents = new ArrayList<>();
             for (Document document : cursor) {
-                ObjectId id = document.getObjectId("_id");
-                Document locationDocument = document.get("location", Document.class);
-                String address = locationDocument == null ? "" : defaultString(locationDocument.getString("address"));
+                if (!matchesDateFilter(document, filters.dateFrom(), filters.dateTo())) {
+                    continue;
+                }
+                filteredEvents.add(mapEvent(document));
+            }
 
-                events.add(new EventResponse(
-                        id == null ? "" : id.toHexString(),
-                        defaultString(document.getString("title")),
-                        defaultString(document.getString("description")),
-                        new EventLocation(address),
-                        defaultString(document.getString("created_at")),
-                        defaultString(document.getString("created_by")),
-                        defaultString(document.getString("started_at")),
-                        defaultString(document.getString("finished_at"))
+            return applyPagination(filteredEvents, filters.limit(), filters.offset());
+        }
+
+        private List<UserResponse> listUsers(UserFilters filters) {
+            List<Bson> mongoFilters = new ArrayList<>();
+            if (!isBlank(filters.id())) {
+                mongoFilters.add(buildIdFilter(filters.id()));
+            }
+            if (!isBlank(filters.name())) {
+                mongoFilters.add(Filters.regex(
+                        "full_name",
+                        Pattern.compile(Pattern.quote(filters.name()), Pattern.CASE_INSENSITIVE)
                 ));
             }
-            return events;
+
+            Bson filter = mongoFilters.isEmpty() ? new Document() : Filters.and(mongoFilters);
+            FindIterable<Document> cursor = usersCollection.find(filter);
+            if (filters.offset() > 0) {
+                cursor = cursor.skip(filters.offset());
+            }
+            if (filters.limit() != null) {
+                cursor = cursor.limit(filters.limit());
+            }
+
+            List<UserResponse> users = new ArrayList<>();
+            for (Document document : cursor) {
+                users.add(mapUser(document));
+            }
+            return users;
+        }
+
+        private UserResponse getUserById(String userId) {
+            if (isBlank(userId)) {
+                return null;
+            }
+
+            Document document = usersCollection.find(buildIdFilter(userId)).first();
+            return document == null ? null : mapUser(document);
+        }
+
+        private boolean userExists(String userId) {
+            if (isBlank(userId)) {
+                return false;
+            }
+            return usersCollection.find(buildIdFilter(userId)).first() != null;
+        }
+
+        private Bson buildEventFilter(EventFilters filters) {
+            List<Bson> mongoFilters = new ArrayList<>();
+
+            if (!isBlank(filters.id())) {
+                mongoFilters.add(buildIdFilter(filters.id()));
+            }
+
+            if (!isBlank(filters.title())) {
+                mongoFilters.add(Filters.regex(
+                        "title",
+                        Pattern.compile(Pattern.quote(filters.title()), Pattern.CASE_INSENSITIVE)
+                ));
+            }
+
+            if (!isBlank(filters.category())) {
+                mongoFilters.add(Filters.eq("category", filters.category()));
+            }
+
+            if (!isBlank(filters.city())) {
+                mongoFilters.add(Filters.eq("location.city", filters.city()));
+            }
+
+            if (!isBlank(filters.address())) {
+                mongoFilters.add(Filters.regex(
+                        "location.address",
+                        Pattern.compile(Pattern.quote(filters.address()), Pattern.CASE_INSENSITIVE)
+                ));
+            }
+
+            if (filters.priceFrom() != null || filters.priceTo() != null) {
+                Document priceFilter = new Document();
+                if (filters.priceFrom() != null) {
+                    priceFilter.append("$gte", filters.priceFrom());
+                }
+                if (filters.priceTo() != null) {
+                    priceFilter.append("$lte", filters.priceTo());
+                }
+                mongoFilters.add(new Document("price", priceFilter));
+            }
+
+            if (!isBlank(filters.userId())) {
+                mongoFilters.add(Filters.eq("created_by", filters.userId()));
+            }
+
+            if (!isBlank(filters.username())) {
+                List<String> userIds = findUserIdsByUsername(filters.username());
+                if (userIds.isEmpty()) {
+                    mongoFilters.add(Filters.exists("_id", false));
+                } else if (userIds.size() == 1) {
+                    mongoFilters.add(Filters.eq("created_by", userIds.get(0)));
+                } else {
+                    mongoFilters.add(Filters.in("created_by", userIds));
+                }
+            }
+
+            if (mongoFilters.isEmpty()) {
+                return new Document();
+            }
+            return Filters.and(mongoFilters);
+        }
+
+        private List<String> findUserIdsByUsername(String username) {
+            List<String> userIds = new ArrayList<>();
+            for (Document user : usersCollection.find(Filters.eq("username", username))) {
+                userIds.add(documentIdAsString(user.get("_id")));
+            }
+            return userIds;
+        }
+
+        private List<EventResponse> applyPagination(List<EventResponse> events, Integer limit, int offset) {
+            int start = Math.min(Math.max(offset, 0), events.size());
+            int end = events.size();
+
+            if (limit != null) {
+                end = Math.min(start + limit, events.size());
+            }
+
+            return new ArrayList<>(events.subList(start, end));
+        }
+
+        private boolean matchesDateFilter(Document document, LocalDate dateFrom, LocalDate dateTo) {
+            if (dateFrom == null && dateTo == null) {
+                return true;
+            }
+
+            String startedAt = stringValue(document.get("started_at"));
+            if (isBlank(startedAt)) {
+                return false;
+            }
+
+            LocalDate startedDate;
+            try {
+                startedDate = OffsetDateTime.parse(startedAt).toLocalDate();
+            } catch (DateTimeParseException e) {
+                return false;
+            }
+
+            if (dateFrom != null && startedDate.isBefore(dateFrom)) {
+                return false;
+            }
+            if (dateTo != null && startedDate.isAfter(dateTo)) {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static Bson buildIdFilter(String id) {
+            if (ObjectId.isValid(id)) {
+                return Filters.or(
+                        Filters.eq("_id", new ObjectId(id)),
+                        Filters.eq("_id", id)
+                );
+            }
+            return Filters.eq("_id", id);
+        }
+
+        private EventResponse mapEvent(Document document) {
+            Document locationDocument = document.get("location", Document.class);
+            String address = "";
+            String city = null;
+            if (locationDocument != null) {
+                address = defaultString(stringValue(locationDocument.get("address")));
+                String rawCity = stringValue(locationDocument.get("city"));
+                city = isBlank(rawCity) ? null : rawCity;
+            }
+
+            String rawCategory = stringValue(document.get("category"));
+            Integer price = intValue(document.get("price"));
+
+            return new EventResponse(
+                    documentIdAsString(document.get("_id")),
+                    defaultString(stringValue(document.get("title"))),
+                    isBlank(rawCategory) ? null : rawCategory,
+                    price,
+                    defaultString(stringValue(document.get("description"))),
+                    new EventLocation(city, address),
+                    defaultString(stringValue(document.get("created_at"))),
+                    defaultString(stringValue(document.get("created_by"))),
+                    defaultString(stringValue(document.get("started_at"))),
+                    defaultString(stringValue(document.get("finished_at")))
+            );
+        }
+
+        private UserResponse mapUser(Document document) {
+            return new UserResponse(
+                    documentIdAsString(document.get("_id")),
+                    defaultString(stringValue(document.get("full_name"))),
+                    defaultString(stringValue(document.get("username")))
+            );
+        }
+
+        private static String documentIdAsString(Object id) {
+            if (id instanceof ObjectId objectId) {
+                return objectId.toHexString();
+            }
+            if (id == null) {
+                return "";
+            }
+            return String.valueOf(id);
+        }
+
+        private static String stringValue(Object value) {
+            return value == null ? null : String.valueOf(value);
+        }
+
+        private static Integer intValue(Object value) {
+            if (value == null) {
+                return null;
+            }
+            if (value instanceof Integer integer) {
+                return integer;
+            }
+            if (value instanceof Long longValue) {
+                if (longValue < Integer.MIN_VALUE || longValue > Integer.MAX_VALUE) {
+                    return null;
+                }
+                return longValue.intValue();
+            }
+            if (value instanceof Double doubleValue) {
+                if (doubleValue % 1 != 0) {
+                    return null;
+                }
+                if (doubleValue < Integer.MIN_VALUE || doubleValue > Integer.MAX_VALUE) {
+                    return null;
+                }
+                return doubleValue.intValue();
+            }
+            if (value instanceof String stringValue && !stringValue.isBlank()) {
+                try {
+                    return Integer.parseInt(stringValue.trim());
+                } catch (NumberFormatException ignored) {
+                    return null;
+                }
+            }
+            return null;
         }
 
         private static boolean isDuplicateKey(MongoWriteException e) {
