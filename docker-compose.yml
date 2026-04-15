@@ -1,14 +1,50 @@
 services:
-  app:
+  gateway:
+    build:
+      context: .
+    env_file:
+      - .env.local
+    depends_on:
+      - session-service
+      - user-service
+      - event-service
+    command: ["healthcheck.GatewayApp"]
+    environment:
+      SESSION_SERVICE_URL: "http://session-service:${SESSION_SERVICE_PORT}"
+      USER_SERVICE_URL: "http://user-service:${USER_SERVICE_PORT}"
+      EVENT_SERVICE_URL: "http://event-service:${EVENT_SERVICE_PORT}"
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+  session-service:
     build:
       context: .
     env_file:
       - .env.local
     depends_on:
       - redis
+    command: ["healthcheck.SessionServiceApp"]
+    expose:
+      - "${SESSION_SERVICE_PORT}"
+  user-service:
+    build:
+      context: .
+    env_file:
+      - .env.local
+    depends_on:
       - mongodb
-    ports:
-      - "${APP_PORT}:${APP_PORT}"
+    command: ["healthcheck.UserServiceApp"]
+    expose:
+      - "${USER_SERVICE_PORT}"
+  event-service:
+    build:
+      context: .
+    env_file:
+      - .env.local
+    depends_on:
+      - mongodb
+    command: ["healthcheck.EventServiceApp"]
+    expose:
+      - "${EVENT_SERVICE_PORT}"
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no", "--port", "${REDIS_PORT}"]
