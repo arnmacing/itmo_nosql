@@ -3,14 +3,19 @@ package healthcheck;
 import io.javalin.http.Context;
 import org.slf4j.Logger;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
 import java.util.regex.Pattern;
 
 final class ServiceSupport {
 
     static final String SESSION_COOKIE_NAME = "X-Session-Id";
     static final Pattern SID_PATTERN = Pattern.compile("^[0-9a-f]{32}$");
+    static final DateTimeFormatter DATE_FILTER_FORMATTER = DateTimeFormatter.BASIC_ISO_DATE
+            .withResolverStyle(ResolverStyle.STRICT);
 
     private ServiceSupport() {
     }
@@ -129,10 +134,76 @@ final class ServiceSupport {
         if (value == null) {
             return null;
         }
-        long parsed = Long.parseLong(value.trim());
+
+        long parsed;
+        try {
+            parsed = Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid query integer");
+        }
+
         if (parsed < 0 || parsed > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("invalid query integer");
         }
         return (int) parsed;
+    }
+
+    static Integer parseUnsignedQueryInt(String value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
+        long parsed;
+        try {
+            parsed = Long.parseLong(trimmed);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
+        if (parsed < 0 || parsed > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
+        return (int) parsed;
+    }
+
+    static String readOptionalQueryString(Context ctx, String name) {
+        String value = ctx.queryParam(name);
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException(name);
+        }
+
+        return trimmed;
+    }
+
+    static LocalDate parseDateQuery(String value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException(fieldName);
+        }
+
+        try {
+            return LocalDate.parse(trimmed, DATE_FILTER_FORMATTER);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(fieldName);
+        }
+    }
+
+    static String defaultString(String value) {
+        return value == null ? "" : value;
     }
 }

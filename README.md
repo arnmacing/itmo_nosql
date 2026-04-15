@@ -6,6 +6,7 @@ HTTP-сервис с Redis-сессиями и MongoDB для пользоват
 APP_HOST=localhost
 APP_PORT=app_port
 APP_USER_SESSION_TTL=60
+
 SESSION_SERVICE_PORT=session_service_port
 USER_SERVICE_PORT=user_service_port
 EVENT_SERVICE_PORT=event_service_port
@@ -18,17 +19,26 @@ REDIS_DB=0
 MONGODB_DATABASE=eventhub
 MONGODB_USER=eventhub
 MONGODB_PASSWORD=eventhub
-MONGODB_HOST=mongodb
-MONGODB_PORT=mongodb_port
+MONGODB_HOST=mongos
+MONGODB_PORT=mongos_port
+
+MONGO_CFG_PORT=configsvr_port
+MONGO_SHARD1A_PORT=shard1a_port
+MONGO_SHARD1B_PORT=shard1b_port
+MONGO_SHARD1C_PORT=shard1c_port
+MONGO_SHARD2A_PORT=shard2a_port
+MONGO_SHARD2B_PORT=shard2b_port
+MONGO_SHARD2C_PORT=shard2c_port
 ```
 
 ## Сервисы
 
-- `gateway` – публичный API (`/health`, `/session`, `/users`, `/auth/*`, `/events`).
-- `session-service` – Redis-сессии (`/internal/sessions/*`).
-- `user-service` – регистрация и аутентификация пользователей (`/internal/users`, `/internal/auth/login`).
-- `event-service` – создание и выдача событий (`/internal/events`).
-- `redis`, `mongodb` – инфраструктура хранения.
+- `gateway` – публичный API.
+- `session-service` – сессии в Redis.
+- `user-service` – пользователи и аутентификация.
+- `event-service` – события и фильтрация.
+- `redis` – хранение сессий.
+- `cfg1`, `shard1*`, `shard2*`, `mongos`, `mongo-init` – MongoDB sharded cluster.
 
 ## Запуск
 
@@ -38,26 +48,22 @@ make run
 
 Публичная точка входа: `http://localhost:${APP_PORT}`.
 
-## Endpoint-ы
+## Публичные endpoint-ы
 
-- `GET /health` – healthcheck, без изменений состояния в Redis.
-- `POST /session` – создание/обновление анонимной сессии.
-- `POST /users` – регистрация пользователя, создание новой сессии с `user_id`.
-- `POST /auth/login` – вход.
-- `POST /auth/logout` – выход, удаление сессии и cookie.
-- `POST /events` – создание события (только авторизованный пользователь).
-- `GET /events` – просмотр событий.
+- `GET /health`
+- `POST /session`
+- `POST /users`
+- `GET /users`
+- `GET /users/{id}`
+- `GET /users/{id}/events`
+- `POST /auth/login`
+- `POST /auth/logout`
+- `POST /events`
+- `PATCH /events/{id}`
+- `GET /events`
+- `GET /events/{id}`
 
-## MongoDB коллекции и индексы
-
-- `users`
-    - поля: `full_name`, `username`, `password_hash`
-    - индекс: `username` unique
-- `events`
-    - поля: `title`, `description`, `location.address`, `created_at`, `created_by`, `started_at`, `finished_at`
-    - индексы: `title` unique, `(title, created_by)`, `created_by`
-
-## Redis сессии
+## Redis
 
 - Ключ: `sid:{session_id}`
 - Тип: `Hash`

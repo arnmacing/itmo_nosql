@@ -6,6 +6,7 @@ import com.mongodb.MongoCredential;
 import com.mongodb.MongoException;
 import com.mongodb.MongoWriteException;
 import com.mongodb.ServerAddress;
+import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
@@ -15,12 +16,15 @@ import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import io.javalin.Javalin;
 import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 import org.mindrot.jbcrypt.BCrypt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 public final class UserServiceApp {
 
@@ -50,6 +54,15 @@ public final class UserServiceApp {
     }
 
     private record LoginResponse(String user_id) {
+    }
+
+    private record UserResponse(String id, String full_name, String username) {
+    }
+
+    private record UsersListResponse(List<UserResponse> users, int count) {
+    }
+
+    private record UserFilters(String id, String name, Integer limit, int offset) {
     }
 
     private record UserCreationResult(boolean created, String userId) {
@@ -113,8 +126,18 @@ public final class UserServiceApp {
 
         app.post("/internal/auth/login", ctx -> {
             LoginRequest request = ServiceSupport.readBody(ctx, LoginRequest.class);
-            if (request == null || ServiceSupport.isBlank(request.username()) || ServiceSupport.isBlank(request.password())) {
+            if (request == null) {
                 ctx.status(400).json(new MessageResponse("invalid \"username\" field"));
+                return;
+            }
+
+            if (ServiceSupport.isBlank(request.username())) {
+                ctx.status(400).json(new MessageResponse("invalid \"username\" field"));
+                return;
+            }
+
+            if (ServiceSupport.isBlank(request.password())) {
+                ctx.status(400).json(new MessageResponse("invalid \"password\" field"));
                 return;
             }
 
@@ -127,6 +150,29 @@ public final class UserServiceApp {
             ctx.json(new LoginResponse(userId));
         });
 
+        app.get("/internal/users", ctx -> {
+            UserFilters filters;
+            try {
+                filters = parseUserFilters(ctx);
+            } catch (IllegalArgumentException e) {
+                ctx.status(400).json(new MessageResponse("invalid \"" + e.getMessage() + "\" field"));
+                return;
+            }
+
+            List<UserResponse> users = userStore.listUsers(filters);
+            ctx.json(new UsersListResponse(users, users.size()));
+        });
+
+        app.get("/internal/users/{id}", ctx -> {
+            String userId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+            UserResponse user = userStore.getUserById(userId);
+            if (user == null) {
+                ctx.status(404).json(new MessageResponse("Not found"));
+                return;
+            }
+            ctx.json(user);
+        });
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             app.stop();
             userStore.close();
@@ -134,6 +180,15 @@ public final class UserServiceApp {
 
         app.start(port);
         log.info("User service started on port {}", port);
+    }
+
+    private static UserFilters parseUserFilters(io.javalin.http.Context ctx) {
+        String id = ServiceSupport.readOptionalQueryString(ctx, "id");
+        String name = ServiceSupport.readOptionalQueryString(ctx, "name");
+        Integer limit = ServiceSupport.parseUnsignedQueryInt(ctx.queryParam("limit"), "limit");
+        Integer offsetRaw = ServiceSupport.parseUnsignedQueryInt(ctx.queryParam("offset"), "offset");
+        int offset = offsetRaw == null ? 0 : offsetRaw;
+        return new UserFilters(id, name, limit, offset);
     }
 
     private static String requireMongoDatabaseName() {
@@ -161,7 +216,7 @@ public final class UserServiceApp {
             this.mongoClient = createMongoClient(host, port, databaseName, username, password);
             MongoDatabase database = mongoClient.getDatabase(databaseName);
             this.usersCollection = database.getCollection("users");
-            this.usersCollection.createIndex(Indexes.ascending("username"), new IndexOptions().unique(true));
+            ensureIndexes();
         }
 
         private static MongoClient createMongoClient(String host, int port, String databaseName, String username, String password) {
@@ -204,6 +259,11 @@ public final class UserServiceApp {
             }
         }
 
+        private void ensureIndexes() {
+            usersCollection.createIndex(Indexes.ascending("username"), new IndexOptions().unique(true));
+            usersCollection.createIndex(Indexes.ascending("full_name"));
+        }
+
         private UserCreationResult createUser(String fullName, String username, String password) {
             String passwordHash = BCrypt.hashpw(password, BCrypt.gensalt());
             Document document = new Document("full_name", fullName)
@@ -212,10 +272,9 @@ public final class UserServiceApp {
 
             try {
                 usersCollection.insertOne(document);
-                ObjectId id = document.getObjectId("_id");
-                return UserCreationResult.created(id.toHexString());
+                return UserCreationResult.created(documentIdAsString(document.get("_id")));
             } catch (MongoWriteException e) {
-                if (e.getError() != null && e.getError().getCategory() == ErrorCategory.DUPLICATE_KEY) {
+                if (isDuplicateKey(e)) {
                     return UserCreationResult.conflict();
                 }
                 throw e;
@@ -244,8 +303,82 @@ public final class UserServiceApp {
                 return null;
             }
 
-            ObjectId userId = user.getObjectId("_id");
-            return userId == null ? null : userId.toHexString();
+            return documentIdAsString(user.get("_id"));
+        }
+
+        private List<UserResponse> listUsers(UserFilters filters) {
+            List<Bson> mongoFilters = new ArrayList<>();
+            if (!ServiceSupport.isBlank(filters.id())) {
+                mongoFilters.add(buildIdFilter(filters.id()));
+            }
+            if (!ServiceSupport.isBlank(filters.name())) {
+                mongoFilters.add(Filters.regex(
+                        "full_name",
+                        Pattern.compile(Pattern.quote(filters.name()), Pattern.CASE_INSENSITIVE)
+                ));
+            }
+
+            Bson filter = mongoFilters.isEmpty() ? new Document() : Filters.and(mongoFilters);
+            FindIterable<Document> cursor = usersCollection.find(filter);
+            if (filters.offset() > 0) {
+                cursor = cursor.skip(filters.offset());
+            }
+            if (filters.limit() != null) {
+                cursor = cursor.limit(filters.limit());
+            }
+
+            List<UserResponse> users = new ArrayList<>();
+            for (Document document : cursor) {
+                users.add(new UserResponse(
+                        documentIdAsString(document.get("_id")),
+                        ServiceSupport.defaultString(stringValue(document.get("full_name"))),
+                        ServiceSupport.defaultString(stringValue(document.get("username")))
+                ));
+            }
+            return users;
+        }
+
+        private UserResponse getUserById(String userId) {
+            if (ServiceSupport.isBlank(userId)) {
+                return null;
+            }
+            Document document = usersCollection.find(buildIdFilter(userId)).first();
+            if (document == null) {
+                return null;
+            }
+            return new UserResponse(
+                    documentIdAsString(document.get("_id")),
+                    ServiceSupport.defaultString(stringValue(document.get("full_name"))),
+                    ServiceSupport.defaultString(stringValue(document.get("username")))
+            );
+        }
+
+        private static Bson buildIdFilter(String id) {
+            if (ObjectId.isValid(id)) {
+                return Filters.or(
+                        Filters.eq("_id", new ObjectId(id)),
+                        Filters.eq("_id", id)
+                );
+            }
+            return Filters.eq("_id", id);
+        }
+
+        private static String documentIdAsString(Object id) {
+            if (id instanceof ObjectId objectId) {
+                return objectId.toHexString();
+            }
+            if (id == null) {
+                return "";
+            }
+            return String.valueOf(id);
+        }
+
+        private static String stringValue(Object value) {
+            return value == null ? null : String.valueOf(value);
+        }
+
+        private static boolean isDuplicateKey(MongoWriteException e) {
+            return e.getError().getCategory() == ErrorCategory.DUPLICATE_KEY;
         }
 
         @Override

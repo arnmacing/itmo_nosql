@@ -32,6 +32,7 @@ public final class GatewayApp {
     private static final String SESSION_SERVICE_URL_ENV = "SESSION_SERVICE_URL";
     private static final String USER_SERVICE_URL_ENV = "USER_SERVICE_URL";
     private static final String EVENT_SERVICE_URL_ENV = "EVENT_SERVICE_URL";
+    private static final String ORGANIZER_HEADER = "X-Organizer-Id";
 
     private record HealthResponse(String status) {
     }
@@ -54,12 +55,14 @@ public final class GatewayApp {
     ) {
     }
 
-    private record EventLocation(String address) {
+    private record EventLocation(String city, String address) {
     }
 
     private record EventResponse(
             String id,
             String title,
+            String category,
+            Integer price,
             String description,
             EventLocation location,
             String created_at,
@@ -70,6 +73,12 @@ public final class GatewayApp {
     }
 
     private record EventsListResponse(List<EventResponse> events, int count) {
+    }
+
+    private record UserResponse(String id, String full_name, String username) {
+    }
+
+    private record UsersListResponse(List<UserResponse> users, int count) {
     }
 
     private record InternalCreateSessionRequest(String user_id) {
@@ -132,7 +141,12 @@ public final class GatewayApp {
         app.post("/auth/login", ctx -> handleLogin(ctx, sessionServiceUrl, userServiceUrl, sessionTtlSeconds));
         app.post("/auth/logout", ctx -> handleLogout(ctx, sessionServiceUrl));
         app.post("/events", ctx -> handleCreateEvent(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
+        app.patch("/events/{id}", ctx -> handlePatchEvent(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
+        app.get("/events/{id}", ctx -> handleGetEvent(ctx, eventServiceUrl, sessionTtlSeconds));
         app.get("/events", ctx -> handleListEvents(ctx, eventServiceUrl, sessionTtlSeconds));
+        app.get("/users/{id}/events", ctx -> handleListUserEvents(ctx, eventServiceUrl, sessionTtlSeconds));
+        app.get("/users/{id}", ctx -> handleGetUser(ctx, userServiceUrl, sessionTtlSeconds));
+        app.get("/users", ctx -> handleListUsers(ctx, userServiceUrl, sessionTtlSeconds));
 
         app.start(port);
         log.info("Gateway started on port {}", port);
@@ -209,11 +223,7 @@ public final class GatewayApp {
             return;
         }
 
-        DownstreamResponse createUserResponse = postJson(
-                userServiceUrl,
-                "/internal/users",
-                request
-        );
+        DownstreamResponse createUserResponse = postJson(userServiceUrl, "/internal/users", request);
         if (createUserResponse == null) {
             ctx.status(502).json(new MessageResponse("external dependency failed"));
             return;
@@ -229,7 +239,7 @@ public final class GatewayApp {
         if (createUserResponse.statusCode == 400) {
             touchSessionIfExists(sessionServiceUrl, requestSid);
             ServiceSupport.maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
-            ctx.status(400).json(new MessageResponse("invalid \"full_name\" field"));
+            ctx.status(400).json(readMessageOrFallback(createUserResponse.body, "invalid \"full_name\" field"));
             return;
         }
 
@@ -300,7 +310,7 @@ public final class GatewayApp {
         if (loginResponse.statusCode == 400) {
             touchSessionIfExists(sessionServiceUrl, requestSid);
             ServiceSupport.maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
-            ctx.status(400).json(new MessageResponse("invalid \"username\" field"));
+            ctx.status(400).json(readMessageOrFallback(loginResponse.body, "invalid \"username\" field"));
             return;
         }
 
@@ -443,7 +453,7 @@ public final class GatewayApp {
         }
 
         if (createEventResponse.statusCode == 400) {
-            ctx.status(400).json(new MessageResponse("invalid \"title\" field"));
+            ctx.status(400).json(readMessageOrFallback(createEventResponse.body, "invalid \"title\" field"));
             return;
         }
 
@@ -461,27 +471,113 @@ public final class GatewayApp {
         ctx.status(201).json(event);
     }
 
+    private static void handlePatchEvent(
+            Context ctx,
+            String sessionServiceUrl,
+            String eventServiceUrl,
+            int sessionTtlSeconds
+    ) {
+        String requestSid = ServiceSupport.readValidSidFromCookie(ctx);
+        if (requestSid == null) {
+            ctx.status(401);
+            return;
+        }
+
+        ServiceSupport.maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
+
+        InternalSessionInfoResponse session = getSessionInfo(sessionServiceUrl, requestSid);
+        if (session == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (!session.exists()) {
+            ctx.status(401);
+            return;
+        }
+
+        touchSessionIfExists(sessionServiceUrl, requestSid);
+
+        if (ServiceSupport.isBlank(session.user_id())) {
+            ctx.status(401);
+            return;
+        }
+
+        String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+        if (ServiceSupport.isBlank(eventId)) {
+            ctx.status(404).json(new MessageResponse("Not found. Be sure that event exists and you are the organizer"));
+            return;
+        }
+
+        DownstreamResponse patchResponse = patchRaw(
+                eventServiceUrl,
+                "/internal/events/" + encodePathSegment(eventId),
+                ctx.body(),
+                ORGANIZER_HEADER,
+                session.user_id()
+        );
+
+        if (patchResponse == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (patchResponse.statusCode == 400) {
+            ctx.status(400).json(readMessageOrFallback(patchResponse.body, "invalid \"category\" field"));
+            return;
+        }
+
+        if (patchResponse.statusCode == 404) {
+            ctx.status(404).json(readMessageOrFallback(
+                    patchResponse.body,
+                    "Not found. Be sure that event exists and you are the organizer"
+            ));
+            return;
+        }
+
+        if (patchResponse.statusCode != 204) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.status(204);
+    }
+
+    private static void handleGetEvent(Context ctx, String eventServiceUrl, int sessionTtlSeconds) {
+        String sid = ServiceSupport.readValidSidFromCookie(ctx);
+        ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+        DownstreamResponse response = get(eventServiceUrl, "/internal/events/" + encodePathSegment(eventId));
+        if (response == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (response.statusCode == 404) {
+            ctx.status(404).json(readMessageOrFallback(response.body, "Not found"));
+            return;
+        }
+
+        if (response.statusCode != 200) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        EventResponse event = parseBody(response.body, EventResponse.class);
+        if (event == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.json(event);
+    }
+
     private static void handleListEvents(Context ctx, String eventServiceUrl, int sessionTtlSeconds) {
         String sid = ServiceSupport.readValidSidFromCookie(ctx);
         ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
 
-        Integer limit;
-        try {
-            limit = ServiceSupport.parseUnsignedQueryInt(ctx.queryParam("limit"));
-        } catch (IllegalArgumentException e) {
-            ctx.status(400).json(new MessageResponse("invalid \"limit\" parameter"));
-            return;
-        }
-
-        Integer offsetRaw;
-        try {
-            offsetRaw = ServiceSupport.parseUnsignedQueryInt(ctx.queryParam("offset"));
-        } catch (IllegalArgumentException e) {
-            ctx.status(400).json(new MessageResponse("invalid \"offset\" parameter"));
-            return;
-        }
-
-        String path = buildEventsPath(ctx.queryParam("title"), limit, offsetRaw);
+        String path = withRawQuery("/internal/events", ctx.queryString());
         DownstreamResponse response = get(eventServiceUrl, path);
         if (response == null) {
             ctx.status(502).json(new MessageResponse("external dependency failed"));
@@ -489,7 +585,7 @@ public final class GatewayApp {
         }
 
         if (response.statusCode == 400) {
-            ctx.status(400).json(new MessageResponse("invalid \"limit\" parameter"));
+            ctx.status(400).json(readMessageOrFallback(response.body, "invalid \"limit\" field"));
             return;
         }
 
@@ -503,27 +599,104 @@ public final class GatewayApp {
             ctx.status(502).json(new MessageResponse("external dependency failed"));
             return;
         }
+
         ctx.json(events);
     }
 
-    private static String buildEventsPath(String title, Integer limit, Integer offset) {
-        StringBuilder path = new StringBuilder("/internal/events");
-        String separator = "?";
+    private static void handleListUsers(Context ctx, String userServiceUrl, int sessionTtlSeconds) {
+        String sid = ServiceSupport.readValidSidFromCookie(ctx);
+        ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
 
-        if (!ServiceSupport.isBlank(title)) {
-            path.append(separator)
-                    .append("title=")
-                    .append(URLEncoder.encode(title, StandardCharsets.UTF_8));
-            separator = "&";
+        String path = withRawQuery("/internal/users", ctx.queryString());
+        DownstreamResponse response = get(userServiceUrl, path);
+        if (response == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
         }
-        if (limit != null) {
-            path.append(separator).append("limit=").append(limit);
-            separator = "&";
+
+        if (response.statusCode == 400) {
+            ctx.status(400).json(readMessageOrFallback(response.body, "invalid \"limit\" field"));
+            return;
         }
-        if (offset != null) {
-            path.append(separator).append("offset=").append(offset);
+
+        if (response.statusCode != 200) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
         }
-        return path.toString();
+
+        UsersListResponse users = parseBody(response.body, UsersListResponse.class);
+        if (users == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.json(users);
+    }
+
+    private static void handleGetUser(Context ctx, String userServiceUrl, int sessionTtlSeconds) {
+        String sid = ServiceSupport.readValidSidFromCookie(ctx);
+        ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String userId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+        DownstreamResponse response = get(userServiceUrl, "/internal/users/" + encodePathSegment(userId));
+        if (response == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (response.statusCode == 404) {
+            ctx.status(404).json(readMessageOrFallback(response.body, "Not found"));
+            return;
+        }
+
+        if (response.statusCode != 200) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        UserResponse user = parseBody(response.body, UserResponse.class);
+        if (user == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.json(user);
+    }
+
+    private static void handleListUserEvents(Context ctx, String eventServiceUrl, int sessionTtlSeconds) {
+        String sid = ServiceSupport.readValidSidFromCookie(ctx);
+        ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String userId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+        String path = withRawQuery("/internal/users/" + encodePathSegment(userId) + "/events", ctx.queryString());
+        DownstreamResponse response = get(eventServiceUrl, path);
+        if (response == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (response.statusCode == 404) {
+            ctx.status(404).json(readMessageOrFallback(response.body, "User not found"));
+            return;
+        }
+
+        if (response.statusCode == 400) {
+            ctx.status(400).json(readMessageOrFallback(response.body, "invalid \"limit\" field"));
+            return;
+        }
+
+        if (response.statusCode != 200) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        EventsListResponse events = parseBody(response.body, EventsListResponse.class);
+        if (events == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.json(events);
     }
 
     private static void touchSessionIfExists(String sessionServiceUrl, String sid) {
@@ -607,6 +780,33 @@ public final class GatewayApp {
         }
     }
 
+    private static DownstreamResponse patchRaw(
+            String baseUrl,
+            String path,
+            String rawBody,
+            String headerName,
+            String headerValue
+    ) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(normalizeUrl(baseUrl, path)))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "application/json")
+                    .header(headerName, headerValue)
+                    .method("PATCH", HttpRequest.BodyPublishers.ofString(rawBody == null ? "" : rawBody))
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            return new DownstreamResponse(response.statusCode(), response.body());
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("Downstream PATCH failed: {}{}", baseUrl, path, e);
+            return null;
+        }
+    }
+
     private static DownstreamResponse get(String baseUrl, String path) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -647,6 +847,26 @@ public final class GatewayApp {
         String normalizedBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         String normalizedPath = path.startsWith("/") ? path : "/" + path;
         return normalizedBase + normalizedPath;
+    }
+
+    private static String withRawQuery(String path, String rawQuery) {
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return path;
+        }
+        return path + "?" + rawQuery;
+    }
+
+    private static String encodePathSegment(String value) {
+        return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8)
+                .replace("+", "%20");
+    }
+
+    private static MessageResponse readMessageOrFallback(String body, String fallbackMessage) {
+        MessageResponse parsed = parseBody(body, MessageResponse.class);
+        if (parsed == null || ServiceSupport.isBlank(parsed.message())) {
+            return new MessageResponse(fallbackMessage);
+        }
+        return parsed;
     }
 
     private static <T> T parseBody(String raw, Class<T> clazz) {
