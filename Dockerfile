@@ -7,5 +7,4 @@ RUN mvn -q -DskipTests package
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /app/target/app.jar /app/app.jar
-ENTRYPOINT ["java", "-cp", "/app/app.jar"]
-CMD ["healthcheck.App"]
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
