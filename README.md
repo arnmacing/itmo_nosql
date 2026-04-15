@@ -4,11 +4,14 @@ HTTP-сервис с Redis-сессиями и MongoDB для пользоват
 
 ```env
 APP_HOST=localhost
-APP_PORT=8080
+APP_PORT=app_port
 APP_USER_SESSION_TTL=60
+SESSION_SERVICE_PORT=session_service_port
+USER_SERVICE_PORT=user_service_port
+EVENT_SERVICE_PORT=event_service_port
 
 REDIS_HOST=redis
-REDIS_PORT=6379
+REDIS_PORT=redis_port
 REDIS_PASSWORD=
 REDIS_DB=0
 
@@ -16,14 +19,24 @@ MONGODB_DATABASE=eventhub
 MONGODB_USER=eventhub
 MONGODB_PASSWORD=eventhub
 MONGODB_HOST=mongodb
-MONGODB_PORT=27017
+MONGODB_PORT=mongodb_port
 ```
+
+## Сервисы
+
+- `gateway` – публичный API (`/health`, `/session`, `/users`, `/auth/*`, `/events`).
+- `session-service` – Redis-сессии (`/internal/sessions/*`).
+- `user-service` – регистрация и аутентификация пользователей (`/internal/users`, `/internal/auth/login`).
+- `event-service` – создание и выдача событий (`/internal/events`).
+- `redis`, `mongodb` – инфраструктура хранения.
 
 ## Запуск
 
 ```bash
 make run
 ```
+
+Публичная точка входа: `http://localhost:${APP_PORT}`.
 
 ## Endpoint-ы
 
