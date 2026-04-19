@@ -1,5 +1,6 @@
 package healthcheck;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +34,7 @@ public final class GatewayApp {
     private static final String USER_SERVICE_URL_ENV = "USER_SERVICE_URL";
     private static final String EVENT_SERVICE_URL_ENV = "EVENT_SERVICE_URL";
     private static final String ORGANIZER_HEADER = "X-Organizer-Id";
+    private static final String REACTION_USER_HEADER = "X-User-Id";
 
     private record HealthResponse(String status) {
     }
@@ -58,6 +60,10 @@ public final class GatewayApp {
     private record EventLocation(String city, String address) {
     }
 
+    private record EventReactions(int likes, int dislikes) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private record EventResponse(
             String id,
             String title,
@@ -68,7 +74,8 @@ public final class GatewayApp {
             String created_at,
             String created_by,
             String started_at,
-            String finished_at
+            String finished_at,
+            EventReactions reactions
     ) {
     }
 
@@ -142,6 +149,22 @@ public final class GatewayApp {
         app.post("/auth/logout", ctx -> handleLogout(ctx, sessionServiceUrl));
         app.post("/events", ctx -> handleCreateEvent(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
         app.patch("/events/{id}", ctx -> handlePatchEvent(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
+        app.post("/events/{id}/like", ctx -> handleEventReaction(
+                ctx,
+                sessionServiceUrl,
+                eventServiceUrl,
+                sessionTtlSeconds,
+                "like",
+                false
+        ));
+        app.post("/events/{id}/dislike", ctx -> handleEventReaction(
+                ctx,
+                sessionServiceUrl,
+                eventServiceUrl,
+                sessionTtlSeconds,
+                "dislike",
+                true
+        ));
         app.get("/events/{id}", ctx -> handleGetEvent(ctx, eventServiceUrl, sessionTtlSeconds));
         app.get("/events", ctx -> handleListEvents(ctx, eventServiceUrl, sessionTtlSeconds));
         app.get("/users/{id}/events", ctx -> handleListUserEvents(ctx, eventServiceUrl, sessionTtlSeconds));
@@ -543,12 +566,77 @@ public final class GatewayApp {
         ctx.status(204);
     }
 
+    private static void handleEventReaction(
+            Context ctx,
+            String sessionServiceUrl,
+            String eventServiceUrl,
+            int sessionTtlSeconds,
+            String reactionType,
+            boolean clearCookieOnUnauthorized
+    ) {
+        String requestSid = ServiceSupport.readValidSidFromCookie(ctx);
+        if (requestSid == null) {
+            if (clearCookieOnUnauthorized) {
+                ServiceSupport.clearSessionCookie(ctx, "");
+            }
+            ctx.status(401);
+            return;
+        }
+
+        InternalSessionInfoResponse session = getSessionInfo(sessionServiceUrl, requestSid);
+        if (session == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (!session.exists() || ServiceSupport.isBlank(session.user_id())) {
+            if (clearCookieOnUnauthorized) {
+                ServiceSupport.clearSessionCookie(ctx, requestSid);
+            }
+            ctx.status(401);
+            return;
+        }
+
+        touchSessionIfExists(sessionServiceUrl, requestSid);
+        ServiceSupport.setSessionCookie(ctx, requestSid, sessionTtlSeconds);
+
+        String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+        if (ServiceSupport.isBlank(eventId)) {
+            ctx.status(404).json(new MessageResponse("Event not found"));
+            return;
+        }
+
+        DownstreamResponse reactionResponse = postEmptyWithHeader(
+                eventServiceUrl,
+                "/internal/events/" + encodePathSegment(eventId) + "/" + reactionType,
+                REACTION_USER_HEADER,
+                session.user_id()
+        );
+        if (reactionResponse == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (reactionResponse.statusCode == 404) {
+            ctx.status(404).json(readMessageOrFallback(reactionResponse.body, "Event not found"));
+            return;
+        }
+
+        if (reactionResponse.statusCode != 204) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.status(204);
+    }
+
     private static void handleGetEvent(Context ctx, String eventServiceUrl, int sessionTtlSeconds) {
         String sid = ServiceSupport.readValidSidFromCookie(ctx);
         ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
 
         String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
-        DownstreamResponse response = get(eventServiceUrl, "/internal/events/" + encodePathSegment(eventId));
+        String path = withRawQuery("/internal/events/" + encodePathSegment(eventId), ctx.queryString());
+        DownstreamResponse response = get(eventServiceUrl, path);
         if (response == null) {
             ctx.status(502).json(new MessageResponse("external dependency failed"));
             return;
@@ -762,13 +850,53 @@ public final class GatewayApp {
 
     private static DownstreamResponse postJson(String baseUrl, String path, Object payload) {
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(normalizeUrl(baseUrl, path)))
-                    .timeout(Duration.ofSeconds(5))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(payload)))
-                    .build();
+            return post(
+                    baseUrl,
+                    path,
+                    HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(payload)),
+                    "Content-Type", "application/json"
+            );
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize POST JSON body: {}{}", baseUrl, path, e);
+            return null;
+        }
+    }
 
+    private static DownstreamResponse postEmptyWithHeader(
+            String baseUrl,
+            String path,
+            String headerName,
+            String headerValue
+    ) {
+        return post(
+                baseUrl,
+                path,
+                HttpRequest.BodyPublishers.noBody(),
+                headerName, headerValue
+        );
+    }
+
+    private static DownstreamResponse post(
+            String baseUrl,
+            String path,
+            HttpRequest.BodyPublisher bodyPublisher,
+            String... headers
+    ) {
+        if (headers == null || headers.length % 2 != 0) {
+            log.error("Invalid headers for POST {}{}.", baseUrl, path);
+            return null;
+        }
+
+        try {
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
+                    .uri(URI.create(normalizeUrl(baseUrl, path)))
+                    .timeout(Duration.ofSeconds(5));
+
+            for (int i = 0; i < headers.length; i += 2) {
+                builder.header(headers[i], headers[i + 1]);
+            }
+
+            HttpRequest request = builder.POST(bodyPublisher).build();
             HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
             return new DownstreamResponse(response.statusCode(), response.body());
         } catch (IOException | InterruptedException e) {
