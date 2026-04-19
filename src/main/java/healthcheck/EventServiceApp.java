@@ -90,6 +90,7 @@ public final class EventServiceApp {
     private static final class ReactionConst {
         private static final String TABLE_NAME = "event_reactions";
         private static final String CACHE_KEY_PATTERN = "events:%s:reactions";
+        private static final String CACHE_COMPAT_KEY_PATTERN = "event:%s:reactions";
         private static final String CACHE_FIELD_LIKES = "likes";
         private static final String CACHE_FIELD_DISLIKES = "dislikes";
         private static final byte LIKE = 1;
@@ -929,7 +930,19 @@ public final class EventServiceApp {
         }
 
         private EventReactions readReactionsFromCache(String title) {
-            return readReactionsFromCacheKey(titleReactionsCacheKey(title));
+            String primaryKey = titleReactionsCacheKey(title);
+            EventReactions reactions = readReactionsFromCacheKey(primaryKey);
+            if (reactions != null) {
+                return reactions;
+            }
+
+            String compatKey = titleReactionsCompatCacheKey(title);
+            reactions = readReactionsFromCacheKey(compatKey);
+            if (reactions != null) {
+                storeReactionsInCacheByKey(primaryKey, reactions);
+            }
+
+            return reactions;
         }
 
         private EventReactions readReactionsFromCacheKey(String cacheKey) {
@@ -950,6 +963,7 @@ public final class EventServiceApp {
 
         private void storeReactionsInCache(String title, EventReactions reactions) {
             storeReactionsInCacheByKey(titleReactionsCacheKey(title), reactions);
+            storeReactionsInCacheByKey(titleReactionsCompatCacheKey(title), reactions);
         }
 
         private void storeReactionsInCacheByKey(String cacheKey, EventReactions reactions) {
@@ -989,11 +1003,18 @@ public final class EventServiceApp {
             if (ServiceSupport.isBlank(title)) {
                 return;
             }
-            reactionsCache.del(titleReactionsCacheKey(title));
+            reactionsCache.del(
+                    titleReactionsCacheKey(title),
+                    titleReactionsCompatCacheKey(title)
+            );
         }
 
         private static String titleReactionsCacheKey(String title) {
             return ReactionConst.CACHE_KEY_PATTERN.formatted(md5Hex(title));
+        }
+
+        private static String titleReactionsCompatCacheKey(String title) {
+            return ReactionConst.CACHE_COMPAT_KEY_PATTERN.formatted(md5Hex(title));
         }
 
         private static String md5Hex(String value) {
