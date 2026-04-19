@@ -850,14 +850,22 @@ public final class GatewayApp {
 
     private static DownstreamResponse postJson(String baseUrl, String path, Object payload) {
         try {
-            return post(
-                    baseUrl,
-                    path,
-                    HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(payload)),
-                    "Content-Type", "application/json"
-            );
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(normalizeUrl(baseUrl, path)))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(payload)))
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            return new DownstreamResponse(response.statusCode(), response.body());
         } catch (JsonProcessingException e) {
             log.error("Failed to serialize POST JSON body: {}{}", baseUrl, path, e);
+            return null;
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("Downstream POST failed: {}{}", baseUrl, path, e);
             return null;
         }
     }
@@ -868,35 +876,14 @@ public final class GatewayApp {
             String headerName,
             String headerValue
     ) {
-        return post(
-                baseUrl,
-                path,
-                HttpRequest.BodyPublishers.noBody(),
-                headerName, headerValue
-        );
-    }
-
-    private static DownstreamResponse post(
-            String baseUrl,
-            String path,
-            HttpRequest.BodyPublisher bodyPublisher,
-            String... headers
-    ) {
-        if (headers == null || headers.length % 2 != 0) {
-            log.error("Invalid headers for POST {}{}.", baseUrl, path);
-            return null;
-        }
-
         try {
-            HttpRequest.Builder builder = HttpRequest.newBuilder()
+            HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(normalizeUrl(baseUrl, path)))
-                    .timeout(Duration.ofSeconds(5));
+                    .timeout(Duration.ofSeconds(5))
+                    .header(headerName, headerValue)
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build();
 
-            for (int i = 0; i < headers.length; i += 2) {
-                builder.header(headers[i], headers[i + 1]);
-            }
-
-            HttpRequest request = builder.POST(bodyPublisher).build();
             HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
             return new DownstreamResponse(response.statusCode(), response.body());
         } catch (IOException | InterruptedException e) {

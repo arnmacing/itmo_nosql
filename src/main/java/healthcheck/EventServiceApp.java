@@ -90,7 +90,6 @@ public final class EventServiceApp {
     private static final class ReactionConst {
         private static final String TABLE_NAME = "event_reactions";
         private static final String CACHE_KEY_PATTERN = "events:%s:reactions";
-        private static final String CACHE_KEY_COMPAT_PATTERN = "event:%s:reactions";
         private static final String CACHE_FIELD_LIKES = "likes";
         private static final String CACHE_FIELD_DISLIKES = "dislikes";
         private static final byte LIKE = 1;
@@ -209,16 +208,24 @@ public final class EventServiceApp {
         int redisDb = ServiceSupport.requireNonNegativeIntEnv(Env.REDIS_DB, log);
         String redisPassword = ServiceSupport.trimToEmpty(System.getenv(Env.REDIS_PASSWORD));
         int likeTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.LIKE_TTL, log);
-        List<String> cassandraHosts = parseCommaSeparatedEnv(Env.CASSANDRA_HOSTS);
+        String[] cassandraHostsRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_HOSTS, log).split(",");
+        List<String> cassandraHosts = new ArrayList<>();
+        for (String cassandraHost : cassandraHostsRaw) {
+            String host = ServiceSupport.trimToEmpty(cassandraHost);
+            if (!host.isBlank()) {
+                cassandraHosts.add(host);
+            }
+        }
+        if (cassandraHosts.isEmpty()) {
+            log.error("Environment variable {} must contain at least one host.", Env.CASSANDRA_HOSTS);
+            System.exit(1);
+        }
         int cassandraPort = ServiceSupport.requirePortEnv(Env.CASSANDRA_PORT, log);
         String cassandraUsername = ServiceSupport.trimToEmpty(System.getenv(Env.CASSANDRA_USERNAME));
         String cassandraPassword = ServiceSupport.trimToEmpty(System.getenv(Env.CASSANDRA_PASSWORD));
-        String cassandraKeyspace = sanitizeEnvValue(ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_KEYSPACE, log));
-        String cassandraConsistencyRaw = sanitizeEnvValue(ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_CONSISTENCY, log));
-        String cassandraLocalDatacenter = sanitizeEnvValue(ServiceSupport.trimToEmpty(System.getenv(Env.CASSANDRA_LOCAL_DC)));
-        if (cassandraLocalDatacenter.isBlank()) {
-            cassandraLocalDatacenter = "datacenter1";
-        }
+        String cassandraKeyspace = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_KEYSPACE, log).trim();
+        String cassandraConsistencyRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_CONSISTENCY, log).trim();
+        String cassandraLocalDatacenter = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_LOCAL_DC, log).trim();
         ConsistencyLevel cassandraConsistency = parseConsistency(cassandraConsistencyRaw);
 
         EventStore eventStore = new EventStore(
@@ -561,33 +568,6 @@ public final class EventServiceApp {
         return "";
     }
 
-    private static List<String> parseCommaSeparatedEnv(String name) {
-        String raw = ServiceSupport.requireNonBlankEnv(name, log);
-        String[] values = raw.split(",");
-        List<String> hosts = new ArrayList<>();
-        for (String value : values) {
-            String trimmed = sanitizeEnvValue(value);
-            if (!trimmed.isBlank()) {
-                hosts.add(trimmed);
-            }
-        }
-
-        if (hosts.isEmpty()) {
-            log.error("Environment variable {} must contain at least one host.", name);
-            System.exit(1);
-        }
-
-        return hosts;
-    }
-
-    private static String sanitizeEnvValue(String value) {
-        String trimmed = ServiceSupport.trimToEmpty(value);
-        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-            return trimmed.substring(1, trimmed.length() - 1).trim();
-        }
-        return trimmed;
-    }
-
     private static ConsistencyLevel parseConsistency(String raw) {
         try {
             return DefaultConsistencyLevel.valueOf(raw.trim().toUpperCase());
@@ -737,12 +717,10 @@ public final class EventServiceApp {
         }
 
         private String ensureCassandraSchema(String keyspaceName) {
-            String keyspace = validateCqlIdentifier(keyspaceName);
-            String tableName = validateCqlIdentifier(ReactionConst.TABLE_NAME);
-            String table = keyspace + "." + tableName;
+            String table = keyspaceName + "." + ReactionConst.TABLE_NAME;
 
             cassandraSession.execute(
-                    "CREATE KEYSPACE IF NOT EXISTS " + keyspace
+                    "CREATE KEYSPACE IF NOT EXISTS " + keyspaceName
                             + " WITH replication = {'class':'SimpleStrategy','replication_factor':1}"
             );
             cassandraSession.execute(
@@ -754,22 +732,8 @@ public final class EventServiceApp {
                             + "PRIMARY KEY ((event_id), created_by)"
                             + ")"
             );
-            cassandraSession.execute(
-                    "CREATE INDEX IF NOT EXISTS event_reactions_like_value_idx ON " + table + " (like_value)"
-            );
-            cassandraSession.execute(
-                    "CREATE INDEX IF NOT EXISTS event_reactions_created_by_idx ON " + table + " (created_by)"
-            );
 
             return table;
-        }
-
-        private static String validateCqlIdentifier(String value) {
-            String normalized = sanitizeEnvValue(value).toLowerCase();
-            if (!normalized.matches("[a-z][a-z0-9_]*")) {
-                throw new IllegalStateException("Invalid Cassandra identifier: " + value);
-            }
-            return normalized;
         }
 
         private void ensureIndexes() {
@@ -965,20 +929,7 @@ public final class EventServiceApp {
         }
 
         private EventReactions readReactionsFromCache(String title) {
-            String primaryKey = titleReactionsCacheKey(title);
-            EventReactions reactions = readReactionsFromCacheKey(primaryKey);
-            if (reactions != null) {
-                return reactions;
-            }
-
-            String compatibilityKey = titleReactionsCompatibilityCacheKey(title);
-            reactions = readReactionsFromCacheKey(compatibilityKey);
-            if (reactions != null) {
-                storeReactionsInCacheByKey(primaryKey, reactions);
-                return reactions;
-            }
-
-            return null;
+            return readReactionsFromCacheKey(titleReactionsCacheKey(title));
         }
 
         private EventReactions readReactionsFromCacheKey(String cacheKey) {
@@ -999,7 +950,6 @@ public final class EventServiceApp {
 
         private void storeReactionsInCache(String title, EventReactions reactions) {
             storeReactionsInCacheByKey(titleReactionsCacheKey(title), reactions);
-            storeReactionsInCacheByKey(titleReactionsCompatibilityCacheKey(title), reactions);
         }
 
         private void storeReactionsInCacheByKey(String cacheKey, EventReactions reactions) {
@@ -1039,18 +989,11 @@ public final class EventServiceApp {
             if (ServiceSupport.isBlank(title)) {
                 return;
             }
-            reactionsCache.del(
-                    titleReactionsCacheKey(title),
-                    titleReactionsCompatibilityCacheKey(title)
-            );
+            reactionsCache.del(titleReactionsCacheKey(title));
         }
 
         private static String titleReactionsCacheKey(String title) {
             return ReactionConst.CACHE_KEY_PATTERN.formatted(md5Hex(title));
-        }
-
-        private static String titleReactionsCompatibilityCacheKey(String title) {
-            return ReactionConst.CACHE_KEY_COMPAT_PATTERN.formatted(md5Hex(title));
         }
 
         private static String md5Hex(String value) {
