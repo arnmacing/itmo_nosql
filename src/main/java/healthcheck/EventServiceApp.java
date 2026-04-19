@@ -733,6 +733,12 @@ public final class EventServiceApp {
                             + "PRIMARY KEY ((event_id), created_by)"
                             + ")"
             );
+            cassandraSession.execute(
+                    "CREATE INDEX IF NOT EXISTS event_reactions_like_value_idx ON " + table + " (like_value)"
+            );
+            cassandraSession.execute(
+                    "CREATE INDEX IF NOT EXISTS event_reactions_created_by_idx ON " + table + " (created_by)"
+            );
 
             return table;
         }
