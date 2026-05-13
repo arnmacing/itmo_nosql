@@ -58,16 +58,16 @@ public class ReviewStore implements AutoCloseable {
                 "INSERT INTO " + reviewsTable + " (id, event_id, created_by, rating, comment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         );
         this.selectReviewByEventAndUserStatement = cassandraSession.prepare(
-                "SELECT id FROM " + reviewsTable + " WHERE event_id = ? AND created_by = ?"
+                "SELECT id FROM " + reviewsTable + " WHERE event_id = ? AND created_by = ? ALLOW FILTERING"
         );
         this.selectReviewsByEventStatement = cassandraSession.prepare(
                 "SELECT id, event_id, created_by, rating, comment, created_at, updated_at FROM " + reviewsTable + " WHERE event_id = ? ORDER BY created_at DESC"
         );
         this.selectReviewByIdStatement = cassandraSession.prepare(
-                "SELECT id, event_id, created_by, rating, comment, created_at, updated_at FROM " + reviewsTable + " WHERE event_id = ? AND id = ?"
+                "SELECT id, event_id, created_by, rating, comment, created_at, updated_at FROM " + reviewsTable + " WHERE event_id = ? AND id = ? ALLOW FILTERING"
         );
         this.updateReviewStatement = cassandraSession.prepare(
-                "UPDATE " + reviewsTable + " SET rating = ?, comment = ?, updated_at = ? WHERE event_id = ? AND id = ? IF created_by = ?"
+                "UPDATE " + reviewsTable + " SET rating = ?, comment = ?, updated_at = ? WHERE event_id = ? AND created_at = ? AND id = ? IF created_by = ?"
         );
         this.selectAllReviewsByEventStatement = cassandraSession.prepare(
                 "SELECT rating FROM " + reviewsTable + " WHERE event_id = ?"
@@ -210,9 +210,13 @@ public class ReviewStore implements AutoCloseable {
 
         byte newRating = rating != null ? rating.byteValue() : existingReview.getByte("rating");
         String newComment = comment != null ? comment.trim() : existingReview.getString("comment");
+        Instant createdAt = existingReview.getInstant("created_at");
+        if (createdAt == null) {
+            return false;
+        }
 
         BoundStatement updateStatement = updateReviewStatement
-                .bind(newRating, newComment, Instant.now(), eventId, reviewUuid, userId)
+                .bind(newRating, newComment, Instant.now(), eventId, createdAt, reviewUuid, userId)
                 .setConsistencyLevel(cassandraConsistency);
         cassandraSession.execute(updateStatement);
 
