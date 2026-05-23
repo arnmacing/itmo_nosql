@@ -718,29 +718,7 @@ public final class EventServiceApp {
         }
 
         private String ensureCassandraSchema(String keyspaceName) {
-            String table = keyspaceName + "." + ReactionConst.TABLE_NAME;
-
-            cassandraSession.execute(
-                    "CREATE KEYSPACE IF NOT EXISTS " + keyspaceName
-                            + " WITH replication = {'class':'SimpleStrategy','replication_factor':1}"
-            );
-            cassandraSession.execute(
-                    "CREATE TABLE IF NOT EXISTS " + table + " ("
-                            + "event_id text, "
-                            + "created_by text, "
-                            + "like_value tinyint, "
-                            + "created_at timestamp, "
-                            + "PRIMARY KEY ((event_id), created_by)"
-                            + ")"
-            );
-            cassandraSession.execute(
-                    "CREATE INDEX IF NOT EXISTS event_reactions_like_value_idx ON " + table + " (like_value)"
-            );
-            cassandraSession.execute(
-                    "CREATE INDEX IF NOT EXISTS event_reactions_created_by_idx ON " + table + " (created_by)"
-            );
-
-            return table;
+            return keyspaceName + "." + ReactionConst.TABLE_NAME;
         }
 
         private void ensureIndexes() {

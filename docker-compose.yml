@@ -55,6 +55,8 @@ services:
         condition: service_started
       cassandra-test:
         condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
       mongos:
         condition: service_healthy
       mongo-init:
@@ -83,6 +85,18 @@ services:
       timeout: 10s
       retries: 30
       start_period: 40s
+
+  cassandra-init:
+    image: cassandra:4.1
+    env_file:
+      - .env.local
+    depends_on:
+      cassandra-test:
+        condition: service_healthy
+    volumes:
+      - ./docker/cassandra-init.sh:/scripts/cassandra-init.sh:ro
+    entrypoint: [ "/bin/bash", "/scripts/cassandra-init.sh" ]
+    restart: "no"
 
   cfg1:
     image: mongo:7
