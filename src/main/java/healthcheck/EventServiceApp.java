@@ -1,5 +1,13 @@
 package healthcheck;
 
+import com.datastax.oss.driver.api.core.ConsistencyLevel;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
+import com.datastax.oss.driver.api.core.cql.BoundStatement;
+import com.datastax.oss.driver.api.core.cql.PreparedStatement;
+import com.datastax.oss.driver.api.core.cql.ResultSet;
+import com.datastax.oss.driver.api.core.cql.Row;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mongodb.ErrorCategory;
@@ -22,12 +30,23 @@ import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import redis.clients.jedis.DefaultJedisClientConfig;
+import redis.clients.jedis.HostAndPort;
+import redis.clients.jedis.JedisPooled;
 
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -35,14 +54,52 @@ public final class EventServiceApp {
 
     private static final Logger log = LoggerFactory.getLogger(EventServiceApp.class);
 
-    private static final String SERVICE_PORT_ENV = "EVENT_SERVICE_PORT";
-    private static final String MONGODB_DATABASE_ENV = "MONGODB_DATABASE";
-    private static final String MONGODB_DATABASE_FALLBACK_ENV = "MONGODB_DATABSE";
-    private static final String MONGODB_USER_ENV = "MONGODB_USER";
-    private static final String MONGODB_PASSWORD_ENV = "MONGODB_PASSWORD";
-    private static final String MONGODB_HOST_ENV = "MONGODB_HOST";
-    private static final String MONGODB_PORT_ENV = "MONGODB_PORT";
-    private static final String ORGANIZER_HEADER = "X-Organizer-Id";
+    private static final class Env {
+        private static final String SERVICE_PORT = "EVENT_SERVICE_PORT";
+        private static final String MONGODB_DATABASE = "MONGODB_DATABASE";
+        private static final String MONGODB_DATABASE_FALLBACK = "MONGODB_DATABSE";
+        private static final String MONGODB_USER = "MONGODB_USER";
+        private static final String MONGODB_PASSWORD = "MONGODB_PASSWORD";
+        private static final String MONGODB_HOST = "MONGODB_HOST";
+        private static final String MONGODB_PORT = "MONGODB_PORT";
+        private static final String REDIS_HOST = "REDIS_HOST";
+        private static final String REDIS_PORT = "REDIS_PORT";
+        private static final String REDIS_PASSWORD = "REDIS_PASSWORD";
+        private static final String REDIS_DB = "REDIS_DB";
+        private static final String LIKE_TTL = "APP_LIKE_TTL";
+        private static final String CASSANDRA_HOSTS = "CASSANDRA_HOSTS";
+        private static final String CASSANDRA_PORT = "CASSANDRA_PORT";
+        private static final String CASSANDRA_USERNAME = "CASSANDRA_USERNAME";
+        private static final String CASSANDRA_PASSWORD = "CASSANDRA_PASSWORD";
+        private static final String CASSANDRA_KEYSPACE = "CASSANDRA_KEYSPACE";
+        private static final String CASSANDRA_CONSISTENCY = "CASSANDRA_CONSISTENCY";
+        private static final String CASSANDRA_LOCAL_DC = "CASSANDRA_LOCAL_DATACENTER";
+
+        private Env() {
+        }
+    }
+
+    private static final class Header {
+        private static final String ORGANIZER_ID = "X-Organizer-Id";
+        private static final String USER_ID = "X-User-Id";
+
+        private Header() {
+        }
+    }
+
+    private static final class ReactionConst {
+        private static final String TABLE_NAME = "event_reactions";
+        private static final String CACHE_KEY_PATTERN = "events:%s:reactions";
+        private static final String CACHE_COMPAT_KEY_PATTERN = "event:%s:reactions";
+        private static final String CACHE_FIELD_LIKES = "likes";
+        private static final String CACHE_FIELD_DISLIKES = "dislikes";
+        private static final byte LIKE = 1;
+        private static final byte DISLIKE = -1;
+
+        private ReactionConst() {
+        }
+    }
+
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Set<String> VALID_EVENT_CATEGORIES = Set.of(
             "meetup",
@@ -74,6 +131,17 @@ public final class EventServiceApp {
     private record EventLocation(String city, String address) {
     }
 
+    private record EventReactions(int likes, int dislikes) {
+        private static EventReactions empty() {
+            return new EventReactions(0, 0);
+        }
+
+        private boolean hasAny() {
+            return likes > 0 || dislikes > 0;
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private record EventResponse(
             String id,
             String title,
@@ -84,7 +152,8 @@ public final class EventServiceApp {
             String created_at,
             String created_by,
             String started_at,
-            String finished_at
+            String finished_at,
+            EventReactions reactions
     ) {
     }
 
@@ -129,14 +198,56 @@ public final class EventServiceApp {
     }
 
     public static void main(String[] args) {
-        int port = ServiceSupport.requirePortEnv(SERVICE_PORT_ENV, log);
+        int port = ServiceSupport.requirePortEnv(Env.SERVICE_PORT, log);
         String mongoDatabase = requireMongoDatabaseName();
-        String mongoUser = ServiceSupport.trimToEmpty(System.getenv(MONGODB_USER_ENV));
-        String mongoPassword = ServiceSupport.trimToEmpty(System.getenv(MONGODB_PASSWORD_ENV));
-        String mongoHost = ServiceSupport.requireNonBlankEnv(MONGODB_HOST_ENV, log);
-        int mongoPort = ServiceSupport.requirePortEnv(MONGODB_PORT_ENV, log);
+        String mongoUser = ServiceSupport.trimToEmpty(System.getenv(Env.MONGODB_USER));
+        String mongoPassword = ServiceSupport.trimToEmpty(System.getenv(Env.MONGODB_PASSWORD));
+        String mongoHost = ServiceSupport.requireNonBlankEnv(Env.MONGODB_HOST, log);
+        int mongoPort = ServiceSupport.requirePortEnv(Env.MONGODB_PORT, log);
+        String redisHost = ServiceSupport.requireNonBlankEnv(Env.REDIS_HOST, log);
+        int redisPort = ServiceSupport.requirePortEnv(Env.REDIS_PORT, log);
+        int redisDb = ServiceSupport.requireNonNegativeIntEnv(Env.REDIS_DB, log);
+        String redisPassword = ServiceSupport.trimToEmpty(System.getenv(Env.REDIS_PASSWORD));
+        int likeTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.LIKE_TTL, log);
+        String[] cassandraHostsRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_HOSTS, log).split(",");
+        List<String> cassandraHosts = new ArrayList<>();
+        for (String cassandraHost : cassandraHostsRaw) {
+            String host = ServiceSupport.trimToEmpty(cassandraHost);
+            if (!host.isBlank()) {
+                cassandraHosts.add(host);
+            }
+        }
+        if (cassandraHosts.isEmpty()) {
+            log.error("Environment variable {} must contain at least one host.", Env.CASSANDRA_HOSTS);
+            System.exit(1);
+        }
+        int cassandraPort = ServiceSupport.requirePortEnv(Env.CASSANDRA_PORT, log);
+        String cassandraUsername = ServiceSupport.trimToEmpty(System.getenv(Env.CASSANDRA_USERNAME));
+        String cassandraPassword = ServiceSupport.trimToEmpty(System.getenv(Env.CASSANDRA_PASSWORD));
+        String cassandraKeyspace = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_KEYSPACE, log).trim();
+        String cassandraConsistencyRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_CONSISTENCY, log).trim();
+        String cassandraLocalDatacenter = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_LOCAL_DC, log).trim();
+        ConsistencyLevel cassandraConsistency = parseConsistency(cassandraConsistencyRaw);
 
-        EventStore eventStore = new EventStore(mongoHost, mongoPort, mongoDatabase, mongoUser, mongoPassword);
+        EventStore eventStore = new EventStore(
+                mongoHost,
+                mongoPort,
+                mongoDatabase,
+                mongoUser,
+                mongoPassword,
+                redisHost,
+                redisPort,
+                redisPassword,
+                redisDb,
+                likeTtlSeconds,
+                cassandraHosts,
+                cassandraPort,
+                cassandraUsername,
+                cassandraPassword,
+                cassandraKeyspace,
+                cassandraLocalDatacenter,
+                cassandraConsistency
+        );
         Javalin app = Javalin.create();
 
         app.get("/health", ctx -> ctx.json(new HealthResponse("ok")));
@@ -191,7 +302,7 @@ public final class EventServiceApp {
         });
 
         app.patch("/internal/events/{id}", ctx -> {
-            String organizerId = ServiceSupport.trimToEmpty(ctx.header(ORGANIZER_HEADER));
+            String organizerId = ServiceSupport.trimToEmpty(ctx.header(Header.ORGANIZER_ID));
             if (ServiceSupport.isBlank(organizerId)) {
                 ctx.status(400).json(new MessageResponse("invalid \"created_by\" field"));
                 return;
@@ -220,9 +331,42 @@ public final class EventServiceApp {
             ctx.status(204);
         });
 
+        app.post("/internal/events/{id}/like", ctx -> {
+            String userId = ServiceSupport.trimToEmpty(ctx.header(Header.USER_ID));
+            if (ServiceSupport.isBlank(userId)) {
+                ctx.status(400).json(new MessageResponse("invalid \"user_id\" field"));
+                return;
+            }
+
+            String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+            if (!eventStore.setReaction(eventId, userId, ReactionConst.LIKE)) {
+                ctx.status(404).json(new MessageResponse("Event not found"));
+                return;
+            }
+
+            ctx.status(204);
+        });
+
+        app.post("/internal/events/{id}/dislike", ctx -> {
+            String userId = ServiceSupport.trimToEmpty(ctx.header(Header.USER_ID));
+            if (ServiceSupport.isBlank(userId)) {
+                ctx.status(400).json(new MessageResponse("invalid \"user_id\" field"));
+                return;
+            }
+
+            String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
+            if (!eventStore.setReaction(eventId, userId, ReactionConst.DISLIKE)) {
+                ctx.status(404).json(new MessageResponse("Event not found"));
+                return;
+            }
+
+            ctx.status(204);
+        });
+
         app.get("/internal/events/{id}", ctx -> {
             String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
-            EventResponse event = eventStore.getEventById(eventId);
+            boolean includeReactions = isIncludeReactionsRequested(ctx);
+            EventResponse event = eventStore.getEventById(eventId, includeReactions);
             if (event == null) {
                 ctx.status(404).json(new MessageResponse("Not found"));
                 return;
@@ -239,7 +383,8 @@ public final class EventServiceApp {
                 return;
             }
 
-            List<EventResponse> events = eventStore.listEvents(filters);
+            boolean includeReactions = isIncludeReactionsRequested(ctx);
+            List<EventResponse> events = eventStore.listEvents(filters, includeReactions);
             ctx.json(new EventsListResponse(events, events.size()));
         });
 
@@ -273,7 +418,8 @@ public final class EventServiceApp {
                 return;
             }
 
-            List<EventResponse> events = eventStore.listEvents(filters);
+            boolean includeReactions = isIncludeReactionsRequested(ctx);
+            List<EventResponse> events = eventStore.listEvents(filters, includeReactions);
             ctx.json(new EventsListResponse(events, events.size()));
         });
 
@@ -408,19 +554,45 @@ public final class EventServiceApp {
     }
 
     private static String requireMongoDatabaseName() {
-        String primary = ServiceSupport.trimToEmpty(System.getenv(MONGODB_DATABASE_ENV));
+        String primary = ServiceSupport.trimToEmpty(System.getenv(Env.MONGODB_DATABASE));
         if (!primary.isBlank()) {
             return primary;
         }
 
-        String fallback = ServiceSupport.trimToEmpty(System.getenv(MONGODB_DATABASE_FALLBACK_ENV));
+        String fallback = ServiceSupport.trimToEmpty(System.getenv(Env.MONGODB_DATABASE_FALLBACK));
         if (!fallback.isBlank()) {
             return fallback;
         }
 
-        log.error("Environment variable {} is required.", MONGODB_DATABASE_ENV);
+        log.error("Environment variable {} is required.", Env.MONGODB_DATABASE);
         System.exit(1);
         return "";
+    }
+
+    private static ConsistencyLevel parseConsistency(String raw) {
+        try {
+            return DefaultConsistencyLevel.valueOf(raw.trim().toUpperCase());
+        } catch (Exception e) {
+            log.error("Invalid {}={}", Env.CASSANDRA_CONSISTENCY, raw);
+            System.exit(1);
+            return DefaultConsistencyLevel.ONE;
+        }
+    }
+
+    private static boolean isIncludeReactionsRequested(Context ctx) {
+        List<String> includes = ctx.queryParams("include");
+        for (String include : includes) {
+            if (include == null) {
+                continue;
+            }
+            String[] tokens = include.split(",");
+            for (String token : tokens) {
+                if ("reactions".equals(token.trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static final class EventStore implements AutoCloseable {
@@ -428,13 +600,60 @@ public final class EventServiceApp {
         private final MongoClient mongoClient;
         private final MongoCollection<Document> usersCollection;
         private final MongoCollection<Document> eventsCollection;
+        private final CqlSession cassandraSession;
+        private final PreparedStatement upsertReactionStatement;
+        private final PreparedStatement selectReactionByEventStatement;
+        private final ConsistencyLevel cassandraConsistency;
+        private final JedisPooled reactionsCache;
+        private final int likeTtlSeconds;
 
-        private EventStore(String host, int port, String databaseName, String username, String password) {
-            this.mongoClient = createMongoClient(host, port, databaseName, username, password);
-            MongoDatabase database = mongoClient.getDatabase(databaseName);
+        private EventStore(
+                String mongoHost,
+                int mongoPort,
+                String mongoDatabaseName,
+                String mongoUsername,
+                String mongoPassword,
+                String redisHost,
+                int redisPort,
+                String redisPassword,
+                int redisDb,
+                int likeTtlSeconds,
+                List<String> cassandraHosts,
+                int cassandraPort,
+                String cassandraUsername,
+                String cassandraPassword,
+                String cassandraKeyspace,
+                String cassandraLocalDatacenter,
+                ConsistencyLevel cassandraConsistency
+        ) {
+            this.mongoClient = createMongoClient(mongoHost, mongoPort, mongoDatabaseName, mongoUsername, mongoPassword);
+            MongoDatabase database = mongoClient.getDatabase(mongoDatabaseName);
             this.usersCollection = database.getCollection("users");
             this.eventsCollection = database.getCollection("events");
             ensureIndexes();
+
+            this.cassandraConsistency = cassandraConsistency;
+            this.cassandraSession = createCassandraSession(
+                    cassandraHosts,
+                    cassandraPort,
+                    cassandraUsername,
+                    cassandraPassword,
+                    cassandraLocalDatacenter
+            );
+            String reactionsTable = ensureCassandraSchema(cassandraKeyspace);
+            this.upsertReactionStatement = cassandraSession.prepare(
+                    "INSERT INTO " + reactionsTable + " (event_id, created_by, like_value, created_at) VALUES (?, ?, ?, ?)"
+            );
+            this.selectReactionByEventStatement = cassandraSession.prepare(
+                    "SELECT like_value FROM " + reactionsTable + " WHERE event_id = ?"
+            );
+
+            DefaultJedisClientConfig.Builder redisConfig = DefaultJedisClientConfig.builder().database(redisDb);
+            if (!redisPassword.isBlank()) {
+                redisConfig.password(redisPassword);
+            }
+            this.reactionsCache = new JedisPooled(new HostAndPort(redisHost, redisPort), redisConfig.build());
+            this.likeTtlSeconds = likeTtlSeconds;
         }
 
         private static MongoClient createMongoClient(String host, int port, String databaseName, String username, String password) {
@@ -475,6 +694,31 @@ public final class EventServiceApp {
             } catch (MongoException e) {
                 return false;
             }
+        }
+
+        private static CqlSession createCassandraSession(
+                List<String> cassandraHosts,
+                int cassandraPort,
+                String cassandraUsername,
+                String cassandraPassword,
+                String cassandraLocalDatacenter
+        ) {
+            var builder = CqlSession.builder()
+                    .withLocalDatacenter(cassandraLocalDatacenter);
+
+            for (String host : cassandraHosts) {
+                builder.addContactPoint(new InetSocketAddress(host, cassandraPort));
+            }
+
+            if (!cassandraUsername.isBlank()) {
+                builder.withAuthCredentials(cassandraUsername, cassandraPassword);
+            }
+
+            return builder.build();
+        }
+
+        private String ensureCassandraSchema(String keyspaceName) {
+            return keyspaceName + "." + ReactionConst.TABLE_NAME;
         }
 
         private void ensureIndexes() {
@@ -556,16 +800,46 @@ public final class EventServiceApp {
             return eventsCollection.updateOne(filter, update).getMatchedCount() > 0;
         }
 
-        private EventResponse getEventById(String eventId) {
+        private boolean setReaction(String eventId, String userId, byte reactionValue) {
+            if (ServiceSupport.isBlank(eventId) || ServiceSupport.isBlank(userId)) {
+                return false;
+            }
+
+            Document event = eventsCollection.find(buildIdFilter(eventId)).first();
+            if (event == null) {
+                return false;
+            }
+
+            String normalizedEventId = documentIdAsString(event.get("_id"));
+            BoundStatement statement = upsertReactionStatement
+                    .bind(normalizedEventId, userId, reactionValue, Instant.now())
+                    .setConsistencyLevel(cassandraConsistency);
+            cassandraSession.execute(statement);
+
+            String title = stringValue(event.get("title"));
+            refreshReactionsCacheByTitle(title);
+            return true;
+        }
+
+        private EventResponse getEventById(String eventId, boolean includeReactions) {
             if (ServiceSupport.isBlank(eventId)) {
                 return null;
             }
 
             Document document = eventsCollection.find(buildIdFilter(eventId)).first();
-            return document == null ? null : mapEvent(document);
+            if (document == null) {
+                return null;
+            }
+
+            EventResponse event = mapEvent(document);
+            if (!includeReactions) {
+                return event;
+            }
+
+            return withReactions(event, readReactionsByTitle(event.title()));
         }
 
-        private List<EventResponse> listEvents(EventFilters filters) {
+        private List<EventResponse> listEvents(EventFilters filters, boolean includeReactions) {
             Bson filter = buildEventFilter(filters);
             FindIterable<Document> cursor = eventsCollection.find(filter);
 
@@ -577,7 +851,200 @@ public final class EventServiceApp {
                 filteredEvents.add(mapEvent(document));
             }
 
-            return applyPagination(filteredEvents, filters.limit(), filters.offset());
+            List<EventResponse> paginated = applyPagination(filteredEvents, filters.limit(), filters.offset());
+            if (!includeReactions) {
+                return paginated;
+            }
+            return attachReactions(paginated);
+        }
+
+        private List<EventResponse> attachReactions(List<EventResponse> events) {
+            if (events.isEmpty()) {
+                return events;
+            }
+
+            Map<String, EventReactions> reactionsByTitle = new HashMap<>();
+            List<EventResponse> withReactions = new ArrayList<>(events.size());
+            for (EventResponse event : events) {
+                EventReactions reactions = reactionsByTitle.computeIfAbsent(
+                        event.title(),
+                        this::readReactionsByTitle
+                );
+                withReactions.add(withReactions(event, reactions));
+            }
+            return withReactions;
+        }
+
+        private static EventResponse withReactions(EventResponse event, EventReactions reactions) {
+            return new EventResponse(
+                    event.id(),
+                    event.title(),
+                    event.category(),
+                    event.price(),
+                    event.description(),
+                    event.location(),
+                    event.created_at(),
+                    event.created_by(),
+                    event.started_at(),
+                    event.finished_at(),
+                    reactions
+            );
+        }
+
+        private EventReactions readReactionsByTitle(String title) {
+            if (ServiceSupport.isBlank(title)) {
+                return EventReactions.empty();
+            }
+
+            EventReactions cached = readReactionsFromCache(title);
+            if (cached != null) {
+                return cached;
+            }
+
+            List<String> eventIds = findAllEventIdsByTitle(title);
+            if (eventIds.isEmpty()) {
+                return EventReactions.empty();
+            }
+
+            EventReactions calculated = readReactionsFromCassandra(eventIds);
+            if (calculated.hasAny()) {
+                storeReactionsInCache(title, calculated);
+            }
+            return calculated;
+        }
+
+        private EventReactions readReactionsFromCache(String title) {
+            String primaryKey = titleReactionsCacheKey(title);
+            EventReactions reactions = readReactionsFromCacheKey(primaryKey);
+            if (reactions != null) {
+                return reactions;
+            }
+
+            String compatKey = titleReactionsCompatCacheKey(title);
+            reactions = readReactionsFromCacheKey(compatKey);
+            if (reactions != null) {
+                storeReactionsInCacheByKey(primaryKey, reactions);
+            }
+
+            return reactions;
+        }
+
+        private EventReactions readReactionsFromCacheKey(String cacheKey) {
+            Map<String, String> values = reactionsCache.hgetAll(cacheKey);
+            if (values == null || values.isEmpty()) {
+                return null;
+            }
+
+            Integer likes = parseNonNegativeInt(values.get(ReactionConst.CACHE_FIELD_LIKES));
+            Integer dislikes = parseNonNegativeInt(values.get(ReactionConst.CACHE_FIELD_DISLIKES));
+            if (likes == null || dislikes == null) {
+                reactionsCache.del(cacheKey);
+                return null;
+            }
+
+            return new EventReactions(likes, dislikes);
+        }
+
+        private void storeReactionsInCache(String title, EventReactions reactions) {
+            storeReactionsInCacheByKey(titleReactionsCacheKey(title), reactions);
+            storeReactionsInCacheByKey(titleReactionsCompatCacheKey(title), reactions);
+        }
+
+        private void storeReactionsInCacheByKey(String cacheKey, EventReactions reactions) {
+            try {
+                Map<String, String> values = Map.of(
+                        ReactionConst.CACHE_FIELD_LIKES, String.valueOf(reactions.likes()),
+                        ReactionConst.CACHE_FIELD_DISLIKES, String.valueOf(reactions.dislikes())
+                );
+                reactionsCache.hset(cacheKey, values);
+                reactionsCache.expire(cacheKey, likeTtlSeconds);
+            } catch (Exception e) {
+                log.warn("Failed to write reactions cache for key {}", cacheKey, e);
+            }
+        }
+
+        private void refreshReactionsCacheByTitle(String title) {
+            if (ServiceSupport.isBlank(title)) {
+                return;
+            }
+
+            List<String> eventIds = findAllEventIdsByTitle(title);
+            if (eventIds.isEmpty()) {
+                invalidateTitleReactionsCache(title);
+                return;
+            }
+
+            EventReactions reactions = readReactionsFromCassandra(eventIds);
+            if (!reactions.hasAny()) {
+                invalidateTitleReactionsCache(title);
+                return;
+            }
+
+            storeReactionsInCache(title, reactions);
+        }
+
+        private void invalidateTitleReactionsCache(String title) {
+            if (ServiceSupport.isBlank(title)) {
+                return;
+            }
+            reactionsCache.del(
+                    titleReactionsCacheKey(title),
+                    titleReactionsCompatCacheKey(title)
+            );
+        }
+
+        private static String titleReactionsCacheKey(String title) {
+            return ReactionConst.CACHE_KEY_PATTERN.formatted(md5Hex(title));
+        }
+
+        private static String titleReactionsCompatCacheKey(String title) {
+            return ReactionConst.CACHE_COMPAT_KEY_PATTERN.formatted(md5Hex(title));
+        }
+
+        private static String md5Hex(String value) {
+            try {
+                MessageDigest md5 = MessageDigest.getInstance("MD5");
+                byte[] digest = md5.digest(value.getBytes(StandardCharsets.UTF_8));
+                return HexFormat.of().formatHex(digest);
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("MD5 is not available", e);
+            }
+        }
+
+        private List<String> findAllEventIdsByTitle(String title) {
+            List<String> eventIds = new ArrayList<>();
+            for (Document event : eventsCollection.find(Filters.eq("title", title)).projection(new Document("_id", 1))) {
+                eventIds.add(documentIdAsString(event.get("_id")));
+            }
+            return eventIds;
+        }
+
+        private EventReactions readReactionsFromCassandra(List<String> eventIds) {
+            int likes = 0;
+            int dislikes = 0;
+
+            for (String eventId : eventIds) {
+                BoundStatement statement = selectReactionByEventStatement
+                        .bind(eventId)
+                        .setConsistencyLevel(cassandraConsistency);
+                ResultSet result = cassandraSession.execute(statement);
+
+                for (Row row : result) {
+                    Byte value = row.getByte("like_value");
+                    if (value == null) {
+                        continue;
+                    }
+                    if (value == ReactionConst.LIKE) {
+                        likes++;
+                        continue;
+                    }
+                    if (value == ReactionConst.DISLIKE) {
+                        dislikes++;
+                    }
+                }
+            }
+
+            return new EventReactions(likes, dislikes);
         }
 
         private boolean userExists(String userId) {
@@ -685,11 +1152,7 @@ public final class EventServiceApp {
             if (dateFrom != null && startedDate.isBefore(dateFrom)) {
                 return false;
             }
-            if (dateTo != null && startedDate.isAfter(dateTo)) {
-                return false;
-            }
-
-            return true;
+            return dateTo == null || !startedDate.isAfter(dateTo);
         }
 
         private EventResponse mapEvent(Document document) {
@@ -715,7 +1178,8 @@ public final class EventServiceApp {
                     ServiceSupport.defaultString(stringValue(document.get("created_at"))),
                     ServiceSupport.defaultString(stringValue(document.get("created_by"))),
                     ServiceSupport.defaultString(stringValue(document.get("started_at"))),
-                    ServiceSupport.defaultString(stringValue(document.get("finished_at")))
+                    ServiceSupport.defaultString(stringValue(document.get("finished_at"))),
+                    null
             );
         }
 
@@ -741,6 +1205,18 @@ public final class EventServiceApp {
 
         private static String stringValue(Object value) {
             return value == null ? null : String.valueOf(value);
+        }
+
+        private static Integer parseNonNegativeInt(String value) {
+            if (ServiceSupport.isBlank(value)) {
+                return null;
+            }
+            try {
+                int parsed = Integer.parseInt(value.trim());
+                return parsed < 0 ? null : parsed;
+            } catch (NumberFormatException e) {
+                return null;
+            }
         }
 
         private static Integer intValue(Object value) {
@@ -782,6 +1258,8 @@ public final class EventServiceApp {
         @Override
         public void close() {
             mongoClient.close();
+            cassandraSession.close();
+            reactionsCache.close();
         }
     }
 }
