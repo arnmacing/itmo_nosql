@@ -63,6 +63,9 @@ public final class GatewayApp {
     private record EventReactions(int likes, int dislikes) {
     }
 
+    private record EventReviews(int count, double rating) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private record EventResponse(
             String id,
@@ -75,8 +78,33 @@ public final class GatewayApp {
             String created_by,
             String started_at,
             String finished_at,
-            EventReactions reactions
+            EventReactions reactions,
+            EventReviews reviews
     ) {
+    }
+
+    private record CreateReviewRequest(String comment, Integer rating) {
+    }
+
+    private record UpdateReviewRequest(String comment, Integer rating) {
+    }
+
+    private record ReviewIdResponse(String id) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private record ReviewResponse(
+            String id,
+            String event_id,
+            String comment,
+            String created_at,
+            String created_by,
+            int rating,
+            String updated_at
+    ) {
+    }
+
+    private record ReviewsListResponse(List<ReviewResponse> reviews, int count) {
     }
 
     private record EventsListResponse(List<EventResponse> events, int count) {
@@ -170,6 +198,9 @@ public final class GatewayApp {
         app.get("/users/{id}/events", ctx -> handleListUserEvents(ctx, eventServiceUrl, sessionTtlSeconds));
         app.get("/users/{id}", ctx -> handleGetUser(ctx, userServiceUrl, sessionTtlSeconds));
         app.get("/users", ctx -> handleListUsers(ctx, userServiceUrl, sessionTtlSeconds));
+        app.post("/events/{event_id}/reviews", ctx -> handleCreateReview(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
+        app.get("/events/{event_id}/reviews", ctx -> handleListReviews(ctx, eventServiceUrl, sessionTtlSeconds));
+        app.patch("/events/{event_id}/reviews/{review_id}", ctx -> handleUpdateReview(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
 
         app.start(port);
         log.info("Gateway started on port {}", port);
@@ -787,6 +818,189 @@ public final class GatewayApp {
         ctx.json(events);
     }
 
+    private static void handleCreateReview(
+            Context ctx,
+            String sessionServiceUrl,
+            String eventServiceUrl,
+            int sessionTtlSeconds
+    ) {
+        String requestSid = ServiceSupport.readValidSidFromCookie(ctx);
+        if (requestSid == null) {
+            ctx.status(401);
+            return;
+        }
+
+        ServiceSupport.maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
+
+        InternalSessionInfoResponse session = getSessionInfo(sessionServiceUrl, requestSid);
+        if (session == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (!session.exists() || ServiceSupport.isBlank(session.user_id())) {
+            ctx.status(401);
+            return;
+        }
+
+        touchSessionIfExists(sessionServiceUrl, requestSid);
+
+        String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("event_id"));
+        CreateReviewRequest request = ServiceSupport.readBody(ctx, CreateReviewRequest.class);
+        if (request == null) {
+            ctx.status(400).json(new MessageResponse("invalid \"comment\" field"));
+            return;
+        }
+
+        if (ServiceSupport.isBlank(request.comment()) || request.comment().length() > 300) {
+            ctx.status(400).json(new MessageResponse("invalid \"comment\" field"));
+            return;
+        }
+
+        if (request.rating() == null || request.rating() < 1 || request.rating() > 5) {
+            ctx.status(400).json(new MessageResponse("invalid \"rating\" field"));
+            return;
+        }
+
+        DownstreamResponse createReviewResponse = postJsonWithHeader(
+                eventServiceUrl,
+                "/internal/events/" + encodePathSegment(eventId) + "/reviews",
+                request,
+                REACTION_USER_HEADER,
+                session.user_id()
+        );
+
+        if (createReviewResponse == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (createReviewResponse.statusCode == 409) {
+            ctx.status(409).json(new MessageResponse("Already exists"));
+            return;
+        }
+
+        if (createReviewResponse.statusCode == 404) {
+            ctx.status(404).json(new MessageResponse("Event not found"));
+            return;
+        }
+
+        if (createReviewResponse.statusCode == 400) {
+            ctx.status(400).json(readMessageOrFallback(createReviewResponse.body, "invalid \"comment\" field"));
+            return;
+        }
+
+        if (createReviewResponse.statusCode != 201) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ReviewIdResponse review = parseBody(createReviewResponse.body, ReviewIdResponse.class);
+        if (review == null || ServiceSupport.isBlank(review.id())) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.status(201).json(review);
+    }
+
+    private static void handleListReviews(Context ctx, String eventServiceUrl, int sessionTtlSeconds) {
+        String sid = ServiceSupport.readValidSidFromCookie(ctx);
+        ServiceSupport.maybeSetSessionCookie(ctx, sid, sessionTtlSeconds);
+
+        String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("event_id"));
+        String rawQuery = ServiceSupport.trimToEmpty(ctx.queryString());
+
+        DownstreamResponse response = get(
+                eventServiceUrl,
+                withRawQuery("/internal/events/" + encodePathSegment(eventId) + "/reviews", rawQuery)
+        );
+
+        if (response == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (response.statusCode == 400) {
+            ctx.status(400).json(readMessageOrFallback(response.body, "invalid \"limit\" field"));
+            return;
+        }
+
+        if (response.statusCode != 200) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ReviewsListResponse reviews = parseBody(response.body, ReviewsListResponse.class);
+        if (reviews == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.json(reviews);
+    }
+
+    private static void handleUpdateReview(
+            Context ctx,
+            String sessionServiceUrl,
+            String eventServiceUrl,
+            int sessionTtlSeconds
+    ) {
+        String requestSid = ServiceSupport.readValidSidFromCookie(ctx);
+        if (requestSid == null) {
+            ctx.status(401);
+            return;
+        }
+
+        ServiceSupport.maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
+
+        InternalSessionInfoResponse session = getSessionInfo(sessionServiceUrl, requestSid);
+        if (session == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (!session.exists() || ServiceSupport.isBlank(session.user_id())) {
+            ctx.status(401);
+            return;
+        }
+
+        touchSessionIfExists(sessionServiceUrl, requestSid);
+
+        String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("event_id"));
+        String reviewId = ServiceSupport.trimToEmpty(ctx.pathParam("review_id"));
+
+        DownstreamResponse patchResponse = patchRaw(
+                eventServiceUrl,
+                "/internal/events/" + encodePathSegment(eventId) + "/reviews/" + encodePathSegment(reviewId),
+                ctx.body(),
+                REACTION_USER_HEADER,
+                session.user_id()
+        );
+
+        if (patchResponse == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (patchResponse.statusCode == 400) {
+            ctx.status(400).json(readMessageOrFallback(patchResponse.body, "invalid request"));
+            return;
+        }
+
+        if (patchResponse.statusCode == 404) {
+            ctx.status(404).json(readMessageOrFallback(patchResponse.body, "Event not found"));
+            return;
+        }
+
+        if (patchResponse.statusCode != 204) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.status(204);
+    }
+
     private static void touchSessionIfExists(String sessionServiceUrl, String sid) {
         if (sid != null) {
             touchSession(sessionServiceUrl, sid);
@@ -854,6 +1068,35 @@ public final class GatewayApp {
                     .uri(URI.create(normalizeUrl(baseUrl, path)))
                     .timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(payload)))
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            return new DownstreamResponse(response.statusCode(), response.body());
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize POST JSON body: {}{}", baseUrl, path, e);
+            return null;
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("Downstream POST failed: {}{}", baseUrl, path, e);
+            return null;
+        }
+    }
+
+    private static DownstreamResponse postJsonWithHeader(
+            String baseUrl,
+            String path,
+            Object payload,
+            String headerName,
+            String headerValue
+    ) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(normalizeUrl(baseUrl, path)))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "application/json")
+                    .header(headerName, headerValue)
                     .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(payload)))
                     .build();
             HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());

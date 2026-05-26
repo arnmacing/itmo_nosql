@@ -67,6 +67,7 @@ public final class EventServiceApp {
         private static final String REDIS_PASSWORD = "REDIS_PASSWORD";
         private static final String REDIS_DB = "REDIS_DB";
         private static final String LIKE_TTL = "APP_LIKE_TTL";
+        private static final String REVIEWS_TTL = "APP_EVENT_REVIEWS_TTL";
         private static final String CASSANDRA_HOSTS = "CASSANDRA_HOSTS";
         private static final String CASSANDRA_PORT = "CASSANDRA_PORT";
         private static final String CASSANDRA_USERNAME = "CASSANDRA_USERNAME";
@@ -97,6 +98,19 @@ public final class EventServiceApp {
         private static final byte DISLIKE = -1;
 
         private ReactionConst() {
+        }
+    }
+
+    private static final class ReviewConst {
+        private static final String TABLE_NAME = "event_reviews";
+        private static final String CACHE_KEY_PATTERN = "event:%s:reviews";
+        private static final String CACHE_FIELD_COUNT = "count";
+        private static final String CACHE_FIELD_RATING = "rating";
+        private static final int MAX_COMMENT_LENGTH = 300;
+        private static final int MIN_RATING = 1;
+        private static final int MAX_RATING = 5;
+
+        private ReviewConst() {
         }
     }
 
@@ -141,6 +155,32 @@ public final class EventServiceApp {
         }
     }
 
+    private record CreateReviewRequest(String comment, Integer rating) {
+    }
+
+    private record UpdateReviewRequest(String comment, Integer rating) {
+    }
+
+    private record ReviewIdResponse(String id) {
+    }
+
+    private record ReviewsListResponse(List<ReviewResponse> reviews, int count) {
+    }
+
+    private record ReviewCreationResult(boolean created, boolean alreadyExists, String reviewId) {
+        public static ReviewCreationResult success(String reviewId) {
+            return new ReviewCreationResult(true, false, reviewId);
+        }
+
+        public static ReviewCreationResult duplicate() {
+            return new ReviewCreationResult(false, true, null);
+        }
+
+        public static ReviewCreationResult failure() {
+            return new ReviewCreationResult(false, false, null);
+        }
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private record EventResponse(
             String id,
@@ -153,7 +193,8 @@ public final class EventServiceApp {
             String created_by,
             String started_at,
             String finished_at,
-            EventReactions reactions
+            EventReactions reactions,
+            EventReviews reviews
     ) {
     }
 
@@ -209,6 +250,7 @@ public final class EventServiceApp {
         int redisDb = ServiceSupport.requireNonNegativeIntEnv(Env.REDIS_DB, log);
         String redisPassword = ServiceSupport.trimToEmpty(System.getenv(Env.REDIS_PASSWORD));
         int likeTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.LIKE_TTL, log);
+        int reviewsTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.REVIEWS_TTL, log);
         String[] cassandraHostsRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_HOSTS, log).split(",");
         List<String> cassandraHosts = new ArrayList<>();
         for (String cassandraHost : cassandraHostsRaw) {
@@ -240,6 +282,7 @@ public final class EventServiceApp {
                 redisPassword,
                 redisDb,
                 likeTtlSeconds,
+                reviewsTtlSeconds,
                 cassandraHosts,
                 cassandraPort,
                 cassandraUsername,
@@ -366,7 +409,8 @@ public final class EventServiceApp {
         app.get("/internal/events/{id}", ctx -> {
             String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("id"));
             boolean includeReactions = isIncludeReactionsRequested(ctx);
-            EventResponse event = eventStore.getEventById(eventId, includeReactions);
+            boolean includeReviews = isIncludeReviewsRequested(ctx);
+            EventResponse event = eventStore.getEventById(eventId, includeReactions, includeReviews);
             if (event == null) {
                 ctx.status(404).json(new MessageResponse("Not found"));
                 return;
@@ -384,7 +428,8 @@ public final class EventServiceApp {
             }
 
             boolean includeReactions = isIncludeReactionsRequested(ctx);
-            List<EventResponse> events = eventStore.listEvents(filters, includeReactions);
+            boolean includeReviews = isIncludeReviewsRequested(ctx);
+            List<EventResponse> events = eventStore.listEvents(filters, includeReactions, includeReviews);
             ctx.json(new EventsListResponse(events, events.size()));
         });
 
@@ -419,8 +464,103 @@ public final class EventServiceApp {
             }
 
             boolean includeReactions = isIncludeReactionsRequested(ctx);
-            List<EventResponse> events = eventStore.listEvents(filters, includeReactions);
+            boolean includeReviews = isIncludeReviewsRequested(ctx);
+            List<EventResponse> events = eventStore.listEvents(filters, includeReactions, includeReviews);
             ctx.json(new EventsListResponse(events, events.size()));
+        });
+
+        app.post("/internal/events/{event_id}/reviews", ctx -> {
+            String userId = ServiceSupport.trimToEmpty(ctx.header(Header.USER_ID));
+            if (ServiceSupport.isBlank(userId)) {
+                ctx.status(400).json(new MessageResponse("invalid \"user_id\" field"));
+                return;
+            }
+
+            String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("event_id"));
+            CreateReviewRequest request = ServiceSupport.readBody(ctx, CreateReviewRequest.class);
+            if (request == null) {
+                ctx.status(400).json(new MessageResponse("invalid \"comment\" field"));
+                return;
+            }
+
+            if (ServiceSupport.isBlank(request.comment()) || request.comment().length() > ReviewConst.MAX_COMMENT_LENGTH) {
+                ctx.status(400).json(new MessageResponse("invalid \"comment\" field"));
+                return;
+            }
+
+            if (request.rating() == null || request.rating() < ReviewConst.MIN_RATING || request.rating() > ReviewConst.MAX_RATING) {
+                ctx.status(400).json(new MessageResponse("invalid \"rating\" field"));
+                return;
+            }
+
+            ReviewCreationResult result = eventStore.createReview(eventId, userId, request.comment().trim(), request.rating());
+            if (result.alreadyExists()) {
+                ctx.status(409).json(new MessageResponse("Already exists"));
+                return;
+            }
+
+            if (!result.created()) {
+                ctx.status(404).json(new MessageResponse("Event not found"));
+                return;
+            }
+
+            ctx.status(201).json(new ReviewIdResponse(result.reviewId()));
+        });
+
+        app.get("/internal/events/{event_id}/reviews", ctx -> {
+            String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("event_id"));
+
+            Integer limit = ServiceSupport.parseUnsignedQueryInt(ctx.queryParam("limit"), "limit");
+            Integer offsetRaw = ServiceSupport.parseUnsignedQueryInt(ctx.queryParam("offset"), "offset");
+            int offset = offsetRaw == null ? 0 : offsetRaw;
+
+            if (limit != null && limit < 0) {
+                ctx.status(400).json(new MessageResponse("invalid \"limit\" field"));
+                return;
+            }
+
+            if (offset < 0) {
+                ctx.status(400).json(new MessageResponse("invalid \"offset\" field"));
+                return;
+            }
+
+            List<ReviewResponse> reviews = eventStore.listReviews(eventId, limit, offset);
+            ctx.json(new ReviewsListResponse(reviews, reviews.size()));
+        });
+
+        app.patch("/internal/events/{event_id}/reviews/{review_id}", ctx -> {
+            String userId = ServiceSupport.trimToEmpty(ctx.header(Header.USER_ID));
+            if (ServiceSupport.isBlank(userId)) {
+                ctx.status(400).json(new MessageResponse("invalid \"user_id\" field"));
+                return;
+            }
+
+            String eventId = ServiceSupport.trimToEmpty(ctx.pathParam("event_id"));
+            String reviewId = ServiceSupport.trimToEmpty(ctx.pathParam("review_id"));
+
+            UpdateReviewRequest request = ServiceSupport.readBody(ctx, UpdateReviewRequest.class);
+            if (request == null) {
+                ctx.status(400).json(new MessageResponse("invalid request"));
+                return;
+            }
+
+            if (request.comment() != null && request.comment().length() > ReviewConst.MAX_COMMENT_LENGTH) {
+                ctx.status(400).json(new MessageResponse("invalid \"comment\" field"));
+                return;
+            }
+
+            if (request.rating() != null && (request.rating() < ReviewConst.MIN_RATING || request.rating() > ReviewConst.MAX_RATING)) {
+                ctx.status(400).json(new MessageResponse("invalid \"rating\" field"));
+                return;
+            }
+
+            boolean updated = eventStore.updateReview(eventId, reviewId, userId, request.comment(), request.rating());
+            if (!updated) {
+                ctx.status(404).json(new MessageResponse("Event not found"));
+                return;
+            }
+
+            ctx.status(204);
         });
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -595,6 +735,22 @@ public final class EventServiceApp {
         return false;
     }
 
+    private static boolean isIncludeReviewsRequested(Context ctx) {
+        List<String> includes = ctx.queryParams("include");
+        for (String include : includes) {
+            if (include == null) {
+                continue;
+            }
+            String[] tokens = include.split(",");
+            for (String token : tokens) {
+                if ("reviews".equals(token.trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static final class EventStore implements AutoCloseable {
 
         private final MongoClient mongoClient;
@@ -605,6 +761,7 @@ public final class EventServiceApp {
         private final PreparedStatement selectReactionByEventStatement;
         private final ConsistencyLevel cassandraConsistency;
         private final JedisPooled reactionsCache;
+        private final ReviewStore reviewStore;
         private final int likeTtlSeconds;
 
         private EventStore(
@@ -618,6 +775,7 @@ public final class EventServiceApp {
                 String redisPassword,
                 int redisDb,
                 int likeTtlSeconds,
+                int reviewsTtlSeconds,
                 List<String> cassandraHosts,
                 int cassandraPort,
                 String cassandraUsername,
@@ -653,6 +811,8 @@ public final class EventServiceApp {
                 redisConfig.password(redisPassword);
             }
             this.reactionsCache = new JedisPooled(new HostAndPort(redisHost, redisPort), redisConfig.build());
+            JedisPooled reviewsCache = new JedisPooled(new HostAndPort(redisHost, redisPort), redisConfig.build());
+            this.reviewStore = new ReviewStore(cassandraSession, cassandraKeyspace, cassandraConsistency, reviewsCache, reviewsTtlSeconds);
             this.likeTtlSeconds = likeTtlSeconds;
         }
 
@@ -821,7 +981,7 @@ public final class EventServiceApp {
             return true;
         }
 
-        private EventResponse getEventById(String eventId, boolean includeReactions) {
+        private EventResponse getEventById(String eventId, boolean includeReactions, boolean includeReviews) {
             if (ServiceSupport.isBlank(eventId)) {
                 return null;
             }
@@ -832,14 +992,16 @@ public final class EventServiceApp {
             }
 
             EventResponse event = mapEvent(document);
-            if (!includeReactions) {
-                return event;
+            if (includeReactions) {
+                event = withReactions(event, readReactionsByTitle(event.title()));
             }
-
-            return withReactions(event, readReactionsByTitle(event.title()));
+            if (includeReviews) {
+                event = withReviews(event, readReviewsByTitle(event.title()));
+            }
+            return event;
         }
 
-        private List<EventResponse> listEvents(EventFilters filters, boolean includeReactions) {
+        private List<EventResponse> listEvents(EventFilters filters, boolean includeReactions, boolean includeReviews) {
             Bson filter = buildEventFilter(filters);
             FindIterable<Document> cursor = eventsCollection.find(filter);
 
@@ -852,10 +1014,13 @@ public final class EventServiceApp {
             }
 
             List<EventResponse> paginated = applyPagination(filteredEvents, filters.limit(), filters.offset());
-            if (!includeReactions) {
-                return paginated;
+            if (includeReactions) {
+                paginated = attachReactions(paginated);
             }
-            return attachReactions(paginated);
+            if (includeReviews) {
+                paginated = attachReviews(paginated);
+            }
+            return paginated;
         }
 
         private List<EventResponse> attachReactions(List<EventResponse> events) {
@@ -887,7 +1052,42 @@ public final class EventServiceApp {
                     event.created_by(),
                     event.started_at(),
                     event.finished_at(),
-                    reactions
+                    reactions,
+                    event.reviews()
+            );
+        }
+
+        private List<EventResponse> attachReviews(List<EventResponse> events) {
+            if (events.isEmpty()) {
+                return events;
+            }
+
+            Map<String, EventReviews> reviewsByTitle = new HashMap<>();
+            List<EventResponse> withReviews = new ArrayList<>(events.size());
+            for (EventResponse event : events) {
+                EventReviews reviews = reviewsByTitle.computeIfAbsent(
+                        event.title(),
+                        this::readReviewsByTitle
+                );
+                withReviews.add(withReviews(event, reviews));
+            }
+            return withReviews;
+        }
+
+        private static EventResponse withReviews(EventResponse event, EventReviews reviews) {
+            return new EventResponse(
+                    event.id(),
+                    event.title(),
+                    event.category(),
+                    event.price(),
+                    event.description(),
+                    event.location(),
+                    event.created_at(),
+                    event.created_by(),
+                    event.started_at(),
+                    event.finished_at(),
+                    event.reactions(),
+                    reviews
             );
         }
 
@@ -1179,6 +1379,7 @@ public final class EventServiceApp {
                     ServiceSupport.defaultString(stringValue(document.get("created_by"))),
                     ServiceSupport.defaultString(stringValue(document.get("started_at"))),
                     ServiceSupport.defaultString(stringValue(document.get("finished_at"))),
+                    null,
                     null
             );
         }
@@ -1255,11 +1456,113 @@ public final class EventServiceApp {
             return e.getError().getCategory() == ErrorCategory.DUPLICATE_KEY;
         }
 
+        private ReviewCreationResult createReview(String eventId, String userId, String comment, int rating) {
+            if (ServiceSupport.isBlank(eventId) || ServiceSupport.isBlank(userId)) {
+                return ReviewCreationResult.failure();
+            }
+
+            Document event = eventsCollection.find(buildIdFilter(eventId)).first();
+            if (event == null) {
+                return ReviewCreationResult.failure();
+            }
+
+            String normalizedEventId = documentIdAsString(event.get("_id"));
+            ReviewStore.ReviewCreationResult result = reviewStore.createReview(normalizedEventId, userId, comment, rating);
+
+            if (result.created()) {
+                String title = stringValue(event.get("title"));
+                refreshReviewsCacheByTitle(title);
+                return ReviewCreationResult.success(result.reviewId());
+            } else if (result.alreadyExists()) {
+                return ReviewCreationResult.duplicate();
+            } else {
+                return ReviewCreationResult.failure();
+            }
+        }
+
+        private List<ReviewResponse> listReviews(String eventId, Integer limit, int offset) {
+            if (ServiceSupport.isBlank(eventId)) {
+                return List.of();
+            }
+
+            Document event = eventsCollection.find(buildIdFilter(eventId)).first();
+            if (event == null) {
+                return List.of();
+            }
+
+            String normalizedEventId = documentIdAsString(event.get("_id"));
+            return reviewStore.listReviews(normalizedEventId, limit, offset);
+        }
+
+        private boolean updateReview(String eventId, String reviewId, String userId, String comment, Integer rating) {
+            if (ServiceSupport.isBlank(eventId) || ServiceSupport.isBlank(reviewId) || ServiceSupport.isBlank(userId)) {
+                return false;
+            }
+
+            Document event = eventsCollection.find(buildIdFilter(eventId)).first();
+            if (event == null) {
+                return false;
+            }
+
+            String normalizedEventId = documentIdAsString(event.get("_id"));
+            boolean updated = reviewStore.updateReview(normalizedEventId, reviewId, userId, comment, rating);
+
+            if (updated) {
+                String title = stringValue(event.get("title"));
+                refreshReviewsCacheByTitle(title);
+            }
+
+            return updated;
+        }
+
+        private EventReviews readReviewsByTitle(String title) {
+            if (ServiceSupport.isBlank(title)) {
+                return EventReviews.empty();
+            }
+
+            EventReviews cached = reviewStore.getReviewsFromCache(title);
+            if (cached != null) {
+                return cached;
+            }
+
+            List<String> eventIds = findAllEventIdsByTitle(title);
+            if (eventIds.isEmpty()) {
+                return EventReviews.empty();
+            }
+
+            EventReviews calculated = reviewStore.getReviewsSummary(eventIds);
+            if (calculated.hasAny()) {
+                reviewStore.storeReviewsInCache(title, calculated);
+            }
+            return calculated;
+        }
+
+        private void refreshReviewsCacheByTitle(String title) {
+            if (ServiceSupport.isBlank(title)) {
+                return;
+            }
+
+            List<String> eventIds = findAllEventIdsByTitle(title);
+            if (eventIds.isEmpty()) {
+                reviewStore.invalidateCache(title);
+                return;
+            }
+
+            EventReviews reviews = reviewStore.getReviewsSummary(eventIds);
+            if (!reviews.hasAny()) {
+                reviewStore.invalidateCache(title);
+                return;
+            }
+
+            reviewStore.storeReviewsInCache(title, reviews);
+        }
+
         @Override
         public void close() {
             mongoClient.close();
             cassandraSession.close();
             reactionsCache.close();
+            reviewStore.close();
         }
     }
 }

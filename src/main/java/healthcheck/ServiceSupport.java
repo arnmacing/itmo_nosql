@@ -10,17 +10,17 @@ import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
 import java.util.regex.Pattern;
 
-final class ServiceSupport {
+public final class ServiceSupport {
 
-    static final String SESSION_COOKIE_NAME = "X-Session-Id";
-    static final Pattern SID_PATTERN = Pattern.compile("^[0-9a-f]{32}$");
-    static final DateTimeFormatter DATE_FILTER_FORMATTER = DateTimeFormatter.BASIC_ISO_DATE
+    public static final String SESSION_COOKIE_NAME = "X-Session-Id";
+    public static final Pattern SID_PATTERN = Pattern.compile("^[0-9a-f]{32}$");
+    public static final DateTimeFormatter DATE_FILTER_FORMATTER = DateTimeFormatter.BASIC_ISO_DATE
             .withResolverStyle(ResolverStyle.STRICT);
 
     private ServiceSupport() {
     }
 
-    static String requireNonBlankEnv(String name, Logger log) {
+    public static String requireNonBlankEnv(String name, Logger log) {
         String raw = System.getenv(name);
         if (raw == null || raw.isBlank()) {
             log.error("Environment variable {} is required.", name);
@@ -29,7 +29,7 @@ final class ServiceSupport {
         return raw.trim();
     }
 
-    static int requirePortEnv(String name, Logger log) {
+    public static int requirePortEnv(String name, Logger log) {
         String raw = requireNonBlankEnv(name, log);
         try {
             int value = Integer.parseInt(raw);
@@ -45,7 +45,7 @@ final class ServiceSupport {
         }
     }
 
-    static int requirePositiveIntEnv(String name, Logger log) {
+    public static int requirePositiveIntEnv(String name, Logger log) {
         String raw = requireNonBlankEnv(name, log);
         try {
             int value = Integer.parseInt(raw);
@@ -61,7 +61,7 @@ final class ServiceSupport {
         }
     }
 
-    static int requireNonNegativeIntEnv(String name, Logger log) {
+    public static int requireNonNegativeIntEnv(String name, Logger log) {
         String raw = requireNonBlankEnv(name, log);
         try {
             int value = Integer.parseInt(raw);
@@ -77,19 +77,19 @@ final class ServiceSupport {
         }
     }
 
-    static String trimToEmpty(String value) {
+    public static String trimToEmpty(String value) {
         return value == null ? "" : value.trim();
     }
 
-    static boolean isBlank(String value) {
+    public static boolean isBlank(String value) {
         return value == null || value.isBlank();
     }
 
-    static boolean isValidSid(String sid) {
+    public static boolean isValidSid(String sid) {
         return sid != null && SID_PATTERN.matcher(sid).matches();
     }
 
-    static String readValidSidFromCookie(Context ctx) {
+    public static String readValidSidFromCookie(Context ctx) {
         String rawSid = ctx.cookie(SESSION_COOKIE_NAME);
         if (rawSid == null) {
             return null;
@@ -98,22 +98,22 @@ final class ServiceSupport {
         return isValidSid(sid) ? sid : null;
     }
 
-    static void setSessionCookie(Context ctx, String sid, int ttlSeconds) {
+    public static void setSessionCookie(Context ctx, String sid, int ttlSeconds) {
         ctx.header("Set-Cookie", SESSION_COOKIE_NAME + "=" + sid + "; HttpOnly; Path=/; Max-Age=" + ttlSeconds);
     }
 
-    static void maybeSetSessionCookie(Context ctx, String sid, int ttlSeconds) {
+    public static void maybeSetSessionCookie(Context ctx, String sid, int ttlSeconds) {
         if (sid != null) {
             setSessionCookie(ctx, sid, ttlSeconds);
         }
     }
 
-    static void clearSessionCookie(Context ctx, String sid) {
+    public static void clearSessionCookie(Context ctx, String sid) {
         String value = sid == null ? "" : sid;
         ctx.header("Set-Cookie", SESSION_COOKIE_NAME + "=" + value + "; HttpOnly; Path=/; Max-Age=0");
     }
 
-    static <T> T readBody(Context ctx, Class<T> clazz) {
+    public static <T> T readBody(Context ctx, Class<T> clazz) {
         try {
             return ctx.bodyAsClass(clazz);
         } catch (Exception e) {
@@ -121,7 +121,7 @@ final class ServiceSupport {
         }
     }
 
-    static boolean isValidRfc3339(String value) {
+    public static boolean isValidRfc3339(String value) {
         try {
             OffsetDateTime.parse(value);
             return true;
@@ -130,7 +130,7 @@ final class ServiceSupport {
         }
     }
 
-    static Integer parseUnsignedQueryInt(String value) {
+    public static Integer parseUnsignedQueryInt(String value) {
         if (value == null) {
             return null;
         }
@@ -148,7 +148,7 @@ final class ServiceSupport {
         return (int) parsed;
     }
 
-    static Integer parseUnsignedQueryInt(String value, String fieldName) {
+    public static Integer parseUnsignedQueryInt(String value, String fieldName) {
         if (value == null) {
             return null;
         }
@@ -172,7 +172,7 @@ final class ServiceSupport {
         return (int) parsed;
     }
 
-    static String readOptionalQueryString(Context ctx, String name) {
+    public static String readOptionalQueryString(Context ctx, String name) {
         String value = ctx.queryParam(name);
         if (value == null) {
             return null;
@@ -186,7 +186,7 @@ final class ServiceSupport {
         return trimmed;
     }
 
-    static LocalDate parseDateQuery(String value, String fieldName) {
+    public static LocalDate parseDateQuery(String value, String fieldName) {
         if (value == null) {
             return null;
         }
@@ -203,7 +203,7 @@ final class ServiceSupport {
         }
     }
 
-    static String defaultString(String value) {
+    public static String defaultString(String value) {
         return value == null ? "" : value;
     }
 }
