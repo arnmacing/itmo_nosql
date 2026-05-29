@@ -77,6 +77,7 @@ public final class EventServiceApp {
         private static final String CASSANDRA_CONSISTENCY = "CASSANDRA_CONSISTENCY";
         private static final String CASSANDRA_LOCAL_DC = "CASSANDRA_LOCAL_DATACENTER";
         private static final String NEO4J_URL = "NEO4J_URL";
+        private static final String NEO4J_USERNAME = "NEO4J_USERNAME";
         private static final String NEO4J_USER = "NEO4J_USER";
         private static final String NEO4J_PASSWORD = "NEO4J_PASSWORD";
 
@@ -264,7 +265,10 @@ public final class EventServiceApp {
         int reviewsTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.REVIEWS_TTL, log);
         int recommendationsTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.RECOMMENDATIONS_TTL, log);
         String neo4jUrl = ServiceSupport.requireNonBlankEnv(Env.NEO4J_URL, log);
-        String neo4jUser = ServiceSupport.trimToEmpty(System.getenv(Env.NEO4J_USER));
+        String neo4jUser = ServiceSupport.trimToEmpty(System.getenv(Env.NEO4J_USERNAME));
+        if (ServiceSupport.isBlank(neo4jUser)) {
+            neo4jUser = ServiceSupport.trimToEmpty(System.getenv(Env.NEO4J_USER));
+        }
         String neo4jPassword = ServiceSupport.trimToEmpty(System.getenv(Env.NEO4J_PASSWORD));
         String[] cassandraHostsRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_HOSTS, log).split(",");
         List<String> cassandraHosts = new ArrayList<>();
