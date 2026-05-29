@@ -68,6 +68,7 @@ public final class EventServiceApp {
         private static final String REDIS_DB = "REDIS_DB";
         private static final String LIKE_TTL = "APP_LIKE_TTL";
         private static final String REVIEWS_TTL = "APP_EVENT_REVIEWS_TTL";
+        private static final String RECOMMENDATIONS_TTL = "APP_RECOMMENDATIONS_TTL";
         private static final String CASSANDRA_HOSTS = "CASSANDRA_HOSTS";
         private static final String CASSANDRA_PORT = "CASSANDRA_PORT";
         private static final String CASSANDRA_USERNAME = "CASSANDRA_USERNAME";
@@ -75,6 +76,9 @@ public final class EventServiceApp {
         private static final String CASSANDRA_KEYSPACE = "CASSANDRA_KEYSPACE";
         private static final String CASSANDRA_CONSISTENCY = "CASSANDRA_CONSISTENCY";
         private static final String CASSANDRA_LOCAL_DC = "CASSANDRA_LOCAL_DATACENTER";
+        private static final String NEO4J_URL = "NEO4J_URL";
+        private static final String NEO4J_USER = "NEO4J_USER";
+        private static final String NEO4J_PASSWORD = "NEO4J_PASSWORD";
 
         private Env() {
         }
@@ -85,6 +89,13 @@ public final class EventServiceApp {
         private static final String USER_ID = "X-User-Id";
 
         private Header() {
+        }
+    }
+
+    private static final class RecommendationsConst {
+        private static final String CACHE_KEY_PATTERN = "user:%s:recomms";
+
+        private RecommendationsConst() {
         }
     }
 
@@ -251,6 +262,10 @@ public final class EventServiceApp {
         String redisPassword = ServiceSupport.trimToEmpty(System.getenv(Env.REDIS_PASSWORD));
         int likeTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.LIKE_TTL, log);
         int reviewsTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.REVIEWS_TTL, log);
+        int recommendationsTtlSeconds = ServiceSupport.requirePositiveIntEnv(Env.RECOMMENDATIONS_TTL, log);
+        String neo4jUrl = ServiceSupport.requireNonBlankEnv(Env.NEO4J_URL, log);
+        String neo4jUser = ServiceSupport.trimToEmpty(System.getenv(Env.NEO4J_USER));
+        String neo4jPassword = ServiceSupport.trimToEmpty(System.getenv(Env.NEO4J_PASSWORD));
         String[] cassandraHostsRaw = ServiceSupport.requireNonBlankEnv(Env.CASSANDRA_HOSTS, log).split(",");
         List<String> cassandraHosts = new ArrayList<>();
         for (String cassandraHost : cassandraHostsRaw) {
@@ -283,13 +298,17 @@ public final class EventServiceApp {
                 redisDb,
                 likeTtlSeconds,
                 reviewsTtlSeconds,
+                recommendationsTtlSeconds,
                 cassandraHosts,
                 cassandraPort,
                 cassandraUsername,
                 cassandraPassword,
                 cassandraKeyspace,
                 cassandraLocalDatacenter,
-                cassandraConsistency
+                cassandraConsistency,
+                neo4jUrl,
+                neo4jUser,
+                neo4jPassword
         );
         Javalin app = Javalin.create();
 
@@ -563,6 +582,17 @@ public final class EventServiceApp {
             ctx.status(204);
         });
 
+        app.get("/internal/recommendations", ctx -> {
+            String userId = ServiceSupport.trimToEmpty(ctx.header(Header.USER_ID));
+            if (ServiceSupport.isBlank(userId)) {
+                ctx.status(401);
+                return;
+            }
+
+            List<EventResponse> recommendations = eventStore.getRecommendations(userId);
+            ctx.json(new EventsListResponse(recommendations, recommendations.size()));
+        });
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             app.stop();
             eventStore.close();
@@ -761,8 +791,11 @@ public final class EventServiceApp {
         private final PreparedStatement selectReactionByEventStatement;
         private final ConsistencyLevel cassandraConsistency;
         private final JedisPooled reactionsCache;
+        private final JedisPooled recommendationsCache;
         private final ReviewStore reviewStore;
+        private final Neo4jGraphManager neo4jGraphManager;
         private final int likeTtlSeconds;
+        private final int recommendationsTtlSeconds;
 
         private EventStore(
                 String mongoHost,
@@ -776,13 +809,17 @@ public final class EventServiceApp {
                 int redisDb,
                 int likeTtlSeconds,
                 int reviewsTtlSeconds,
+                int recommendationsTtlSeconds,
                 List<String> cassandraHosts,
                 int cassandraPort,
                 String cassandraUsername,
                 String cassandraPassword,
                 String cassandraKeyspace,
                 String cassandraLocalDatacenter,
-                ConsistencyLevel cassandraConsistency
+                ConsistencyLevel cassandraConsistency,
+                String neo4jUrl,
+                String neo4jUser,
+                String neo4jPassword
         ) {
             this.mongoClient = createMongoClient(mongoHost, mongoPort, mongoDatabaseName, mongoUsername, mongoPassword);
             MongoDatabase database = mongoClient.getDatabase(mongoDatabaseName);
@@ -811,9 +848,12 @@ public final class EventServiceApp {
                 redisConfig.password(redisPassword);
             }
             this.reactionsCache = new JedisPooled(new HostAndPort(redisHost, redisPort), redisConfig.build());
+            this.recommendationsCache = new JedisPooled(new HostAndPort(redisHost, redisPort), redisConfig.build());
             JedisPooled reviewsCache = new JedisPooled(new HostAndPort(redisHost, redisPort), redisConfig.build());
             this.reviewStore = new ReviewStore(cassandraSession, cassandraKeyspace, cassandraConsistency, reviewsCache, reviewsTtlSeconds);
+            this.neo4jGraphManager = new Neo4jGraphManager(neo4jUrl, neo4jUser, neo4jPassword);
             this.likeTtlSeconds = likeTtlSeconds;
+            this.recommendationsTtlSeconds = recommendationsTtlSeconds;
         }
 
         private static MongoClient createMongoClient(String host, int port, String databaseName, String username, String password) {
@@ -914,7 +954,10 @@ public final class EventServiceApp {
 
             try {
                 eventsCollection.insertOne(event);
-                return EventCreationResult.created(documentIdAsString(event.get("_id")));
+                String eventId = documentIdAsString(event.get("_id"));
+                neo4jGraphManager.createEvent(eventId, title);
+                neo4jGraphManager.createUser(userId);
+                return EventCreationResult.created(eventId);
             } catch (MongoWriteException e) {
                 if (isDuplicateKey(e)) {
                     return EventCreationResult.conflict();
@@ -975,6 +1018,12 @@ public final class EventServiceApp {
                     .bind(normalizedEventId, userId, reactionValue, Instant.now())
                     .setConsistencyLevel(cassandraConsistency);
             cassandraSession.execute(statement);
+
+            if (reactionValue == ReactionConst.LIKE) {
+                neo4jGraphManager.createUser(userId);
+                neo4jGraphManager.createLike(userId, normalizedEventId);
+                invalidateRecommendationsCache(userId);
+            }
 
             String title = stringValue(event.get("title"));
             refreshReactionsCacheByTitle(title);
@@ -1557,12 +1606,121 @@ public final class EventServiceApp {
             reviewStore.storeReviewsInCache(title, reviews);
         }
 
+        private List<EventResponse> getRecommendations(String userId) {
+            if (ServiceSupport.isBlank(userId)) {
+                return List.of();
+            }
+
+            String cached = getRecommendationsFromCache(userId);
+            if (cached != null) {
+                try {
+                    EventsListResponse response = OBJECT_MAPPER.readValue(cached, EventsListResponse.class);
+                    if (response != null && response.events() != null) {
+                        return response.events();
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse cached recommendations for userId={}", userId, e);
+                }
+            }
+
+            List<String> recommendedEventIds = neo4jGraphManager.getRecommendedEventIds(userId);
+            if (recommendedEventIds.isEmpty()) {
+                return List.of();
+            }
+
+            List<EventResponse> recommendations = new ArrayList<>();
+            Map<String, EventResponse> eventsByTitle = new HashMap<>();
+
+            for (String eventId : recommendedEventIds) {
+                Document document = eventsCollection.find(buildIdFilter(eventId)).first();
+                if (document == null) {
+                    continue;
+                }
+
+                EventResponse event = mapEvent(document);
+                String title = event.title();
+
+                if (!eventsByTitle.containsKey(title)) {
+                    eventsByTitle.put(title, event);
+                    recommendations.add(event);
+                } else {
+                    EventResponse existing = eventsByTitle.get(title);
+                    if (isEarlier(event.started_at(), existing.started_at())) {
+                        recommendations.remove(existing);
+                        eventsByTitle.put(title, event);
+                        recommendations.add(event);
+                    }
+                }
+            }
+
+            if (!recommendations.isEmpty()) {
+                storeRecommendationsInCache(userId, recommendations);
+            }
+
+            return recommendations;
+        }
+
+        private boolean isEarlier(String date1, String date2) {
+            try {
+                OffsetDateTime dt1 = OffsetDateTime.parse(date1);
+                OffsetDateTime dt2 = OffsetDateTime.parse(date2);
+                return dt1.isBefore(dt2);
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        private String getRecommendationsFromCache(String userId) {
+            if (ServiceSupport.isBlank(userId)) {
+                return null;
+            }
+            try {
+                String cacheKey = recommendationsCacheKey(userId);
+                return recommendationsCache.get(cacheKey);
+            } catch (Exception e) {
+                log.warn("Failed to read recommendations cache for userId={}", userId, e);
+                return null;
+            }
+        }
+
+        private void storeRecommendationsInCache(String userId, List<EventResponse> recommendations) {
+            if (ServiceSupport.isBlank(userId) || recommendations == null) {
+                return;
+            }
+            try {
+                String cacheKey = recommendationsCacheKey(userId);
+                EventsListResponse response = new EventsListResponse(recommendations, recommendations.size());
+                String json = OBJECT_MAPPER.writeValueAsString(response);
+                recommendationsCache.setex(cacheKey, recommendationsTtlSeconds, json);
+            } catch (Exception e) {
+                log.warn("Failed to store recommendations cache for userId={}", userId, e);
+            }
+        }
+
+        private void invalidateRecommendationsCache(String userId) {
+            if (ServiceSupport.isBlank(userId)) {
+                return;
+            }
+            try {
+                String cacheKey = recommendationsCacheKey(userId);
+                recommendationsCache.del(cacheKey);
+            } catch (Exception e) {
+                log.warn("Failed to invalidate recommendations cache for userId={}", userId, e);
+            }
+        }
+
+        private static String recommendationsCacheKey(String userId) {
+            return RecommendationsConst.CACHE_KEY_PATTERN.formatted(userId);
+        }
+
         @Override
         public void close() {
             mongoClient.close();
             cassandraSession.close();
             reactionsCache.close();
+            recommendationsCache.close();
             reviewStore.close();
+            neo4jGraphManager.close();
         }
     }
 }

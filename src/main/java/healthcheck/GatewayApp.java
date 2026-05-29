@@ -201,6 +201,7 @@ public final class GatewayApp {
         app.post("/events/{event_id}/reviews", ctx -> handleCreateReview(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
         app.get("/events/{event_id}/reviews", ctx -> handleListReviews(ctx, eventServiceUrl, sessionTtlSeconds));
         app.patch("/events/{event_id}/reviews/{review_id}", ctx -> handleUpdateReview(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
+        app.get("/recommendations", ctx -> handleGetRecommendations(ctx, sessionServiceUrl, eventServiceUrl, sessionTtlSeconds));
 
         app.start(port);
         log.info("Gateway started on port {}", port);
@@ -1001,6 +1002,59 @@ public final class GatewayApp {
         ctx.status(204);
     }
 
+    private static void handleGetRecommendations(
+            Context ctx,
+            String sessionServiceUrl,
+            String eventServiceUrl,
+            int sessionTtlSeconds
+    ) {
+        String requestSid = ServiceSupport.readValidSidFromCookie(ctx);
+        if (requestSid == null) {
+            ctx.status(401);
+            return;
+        }
+
+        ServiceSupport.maybeSetSessionCookie(ctx, requestSid, sessionTtlSeconds);
+
+        InternalSessionInfoResponse session = getSessionInfo(sessionServiceUrl, requestSid);
+        if (session == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (!session.exists() || ServiceSupport.isBlank(session.user_id())) {
+            ctx.status(401);
+            return;
+        }
+
+        touchSessionIfExists(sessionServiceUrl, requestSid);
+
+        DownstreamResponse response = getWithHeader(
+                eventServiceUrl,
+                "/internal/recommendations",
+                REACTION_USER_HEADER,
+                session.user_id()
+        );
+
+        if (response == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        if (response.statusCode != 200) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        EventsListResponse events = parseBody(response.body, EventsListResponse.class);
+        if (events == null) {
+            ctx.status(502).json(new MessageResponse("external dependency failed"));
+            return;
+        }
+
+        ctx.json(events);
+    }
+
     private static void touchSessionIfExists(String sessionServiceUrl, String sid) {
         if (sid != null) {
             touchSession(sessionServiceUrl, sid);
@@ -1170,6 +1224,30 @@ public final class GatewayApp {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(normalizeUrl(baseUrl, path)))
                     .timeout(Duration.ofSeconds(5))
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            return new DownstreamResponse(response.statusCode(), response.body());
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.error("Downstream GET failed: {}{}", baseUrl, path, e);
+            return null;
+        }
+    }
+
+    private static DownstreamResponse getWithHeader(
+            String baseUrl,
+            String path,
+            String headerName,
+            String headerValue
+    ) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(normalizeUrl(baseUrl, path)))
+                    .timeout(Duration.ofSeconds(5))
+                    .header(headerName, headerValue)
                     .GET()
                     .build();
             HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());

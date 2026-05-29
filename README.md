@@ -38,6 +38,11 @@ CASSANDRA_PASSWORD=
 CASSANDRA_KEYSPACE=testkeyspace
 CASSANDRA_CONSISTENCY=ONE
 CASSANDRA_LOCAL_DATACENTER=datacenter1
+
+NEO4J_URL=bolt://neo4j:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
+APP_RECOMMENDATIONS_TTL=60
 ```
 
 ## Сервисы
@@ -46,8 +51,9 @@ CASSANDRA_LOCAL_DATACENTER=datacenter1
 - `session-service` – сессии в Redis.
 - `user-service` – пользователи и аутентификация.
 - `event-service` – события и фильтрация.
-- `redis` – хранение сессий.
+- `redis` – хранение сессий, кэш реакций и рекомендаций.
 - `cassandra-test` – хранение реакций на события.
+- `neo4j` – граф для рекомендаций событий.
 - `cfg1`, `shard1*`, `shard2*`, `mongos`, `mongo-init` – MongoDB sharded cluster.
 
 ## Запуск
@@ -74,6 +80,10 @@ make run
 - `POST /events/{id}/dislike`
 - `GET /events`
 - `GET /events/{id}`
+- `GET /recommendations` (требует авторизации)
+- `POST /events/{event_id}/reviews`
+- `GET /events/{event_id}/reviews`
+- `PATCH /events/{event_id}/reviews/{review_id}`
 
 ## Redis
 
@@ -88,3 +98,11 @@ make run
 - Redis ключ: `events:{md5(title)}:reactions`
 - Redis значение: `{"likes": N, "dislikes": M}`
 - TTL кэша реакций: `APP_LIKE_TTL`
+
+## Рекомендации событий
+
+- Neo4j граф: узлы `User` (id) и `Event` (id, title), связь `LIKED`
+- Алгоритм: коллаборативная фильтрация на основе лайков
+- Redis ключ: `user:{user_id}:recomms`
+- Redis значение: JSON с массивом событий
+- TTL кэша рекомендаций: `APP_RECOMMENDATIONS_TTL`
