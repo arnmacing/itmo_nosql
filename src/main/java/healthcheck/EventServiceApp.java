@@ -95,6 +95,7 @@ public final class EventServiceApp {
 
     private static final class RecommendationsConst {
         private static final String CACHE_KEY_PATTERN = "user:%s:recomms";
+        private static final String CACHE_FIELD_EVENTS = "events";
 
         private RecommendationsConst() {
         }
@@ -1618,9 +1619,12 @@ public final class EventServiceApp {
             String cached = getRecommendationsFromCache(userId);
             if (cached != null) {
                 try {
-                    EventsListResponse response = OBJECT_MAPPER.readValue(cached, EventsListResponse.class);
-                    if (response != null && response.events() != null) {
-                        return response.events();
+                    List<EventResponse> events = OBJECT_MAPPER.readValue(
+                            cached,
+                            OBJECT_MAPPER.getTypeFactory().constructCollectionType(List.class, EventResponse.class)
+                    );
+                    if (events != null) {
+                        return events;
                     }
                 } catch (Exception e) {
                     log.warn("Failed to parse cached recommendations for userId={}", userId, e);
@@ -1680,7 +1684,7 @@ public final class EventServiceApp {
             }
             try {
                 String cacheKey = recommendationsCacheKey(userId);
-                return recommendationsCache.get(cacheKey);
+                return recommendationsCache.hget(cacheKey, RecommendationsConst.CACHE_FIELD_EVENTS);
             } catch (Exception e) {
                 log.warn("Failed to read recommendations cache for userId={}", userId, e);
                 return null;
@@ -1693,9 +1697,9 @@ public final class EventServiceApp {
             }
             try {
                 String cacheKey = recommendationsCacheKey(userId);
-                EventsListResponse response = new EventsListResponse(recommendations, recommendations.size());
-                String json = OBJECT_MAPPER.writeValueAsString(response);
-                recommendationsCache.setex(cacheKey, recommendationsTtlSeconds, json);
+                String json = OBJECT_MAPPER.writeValueAsString(recommendations);
+                recommendationsCache.hset(cacheKey, Map.of(RecommendationsConst.CACHE_FIELD_EVENTS, json));
+                recommendationsCache.expire(cacheKey, recommendationsTtlSeconds);
             } catch (Exception e) {
                 log.warn("Failed to store recommendations cache for userId={}", userId, e);
             }
