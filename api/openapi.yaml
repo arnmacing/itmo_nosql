@@ -1,0 +1,1110 @@
+openapi: 3.0.3
+info:
+  title: EventHub NoSQL API
+  description: |
+    Сервис управления событиями
+
+    **Аутентификация:** cookie `X-Session-Id`. Получите сессию через `POST /session`,
+    затем передавайте cookie во всех запросах, требующих авторизации.
+
+    **Базовый URL:** `http://localhost:8080`
+  version: 1.0.0
+  contact:
+    name: GitHub Repository
+    url: https://github.com/arnmacing/itmo_nosql
+
+servers:
+  - url: http://localhost:8080
+    description: Локальный запуск
+
+tags:
+  - name: Health
+    description: Проверка состояния сервиса
+  - name: Session
+    description: Управление сессиями
+  - name: Auth
+    description: Аутентификация
+  - name: Users
+    description: Операции с пользователями
+  - name: Events
+    description: Операции с событиями
+  - name: Reviews
+    description: Отзывы на события
+  - name: Recommendations
+    description: Персональные рекомендации
+
+components:
+  schemas:
+
+    Error:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Not found"
+      required: [ message ]
+
+    UserPublic:
+      type: object
+      description: Публичные данные пользователя
+      properties:
+        id:
+          type: string
+          example: "6838a509c88c466b1142d79f"
+        full_name:
+          type: string
+          example: "Alice Example"
+        username:
+          type: string
+          example: "alice"
+      required: [ id, full_name, username ]
+
+    UserCreate:
+      type: object
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          example: "Alice Example"
+        username:
+          type: string
+          minLength: 1
+          example: "alice"
+        password:
+          type: string
+          minLength: 1
+          example: "secret123"
+      required: [ full_name, username, password ]
+
+    LoginRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          example: "alice"
+        password:
+          type: string
+          example: "secret123"
+      required: [ username, password ]
+
+    EventLocation:
+      type: object
+      properties:
+        address:
+          type: string
+          example: "Kronverkskiy prospekt 49"
+        city:
+          type: string
+          example: "Saint Petersburg"
+
+    EventReactions:
+      type: object
+      properties:
+        likes:
+          type: integer
+          example: 12
+        dislikes:
+          type: integer
+          example: 2
+
+    EventReviews:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 5
+        rating:
+          type: number
+          format: float
+          example: 4.6
+
+    Event:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "6838a60123ad784ab518de0b"
+        title:
+          type: string
+          example: "NoSQL Meetup"
+        description:
+          type: string
+          nullable: true
+          example: "Talks and networking"
+        category:
+          type: string
+          enum: [ meetup, concert, exhibition, party, other ]
+          nullable: true
+          example: "meetup"
+        price:
+          type: integer
+          minimum: 0
+          nullable: true
+          example: 1500
+        location:
+          $ref: '#/components/schemas/EventLocation'
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-29T16:35:18.925Z"
+        created_by:
+          type: string
+          example: "6838a509c88c466b1142d79f"
+        started_at:
+          type: string
+          format: date-time
+          example: "2030-01-15T18:00:00Z"
+        finished_at:
+          type: string
+          format: date-time
+          example: "2030-01-15T21:00:00Z"
+        reactions:
+          $ref: '#/components/schemas/EventReactions'
+          nullable: true
+        reviews:
+          $ref: '#/components/schemas/EventReviews'
+          nullable: true
+      required: [ id, title, location, created_at, created_by, started_at, finished_at ]
+
+    EventCreate:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          example: "NoSQL Meetup"
+        address:
+          type: string
+          minLength: 1
+          example: "Kronverkskiy prospekt 49"
+        started_at:
+          type: string
+          format: date-time
+          example: "2030-01-15T18:00:00Z"
+        finished_at:
+          type: string
+          format: date-time
+          example: "2030-01-15T21:00:00Z"
+        description:
+          type: string
+          nullable: true
+          example: "Talks and networking"
+      required: [ title, address, started_at, finished_at ]
+
+    EventPatch:
+      type: object
+      description: Все поля опциональны; передаётся только то, что нужно изменить
+      properties:
+        category:
+          type: string
+          enum: [ meetup, concert, exhibition, party, other ]
+          example: "meetup"
+        price:
+          type: integer
+          minimum: 0
+          example: 1500
+        city:
+          type: string
+          description: Пустая строка удаляет поле из документа
+          example: "Saint Petersburg"
+
+    Review:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "f5a08ebf-f3cb-4f88-9739-18f2950bff16"
+        event_id:
+          type: string
+          example: "6838a60123ad784ab518de0b"
+        comment:
+          type: string
+          example: "Отлично организованное мероприятие!"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-29T16:37:15.086Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-05-29T16:37:15.086Z"
+        created_by:
+          type: string
+          example: "6838a509c88c466b1142d79f"
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+      required: [ id, event_id, comment, created_at, updated_at, created_by, rating ]
+
+    ReviewCreate:
+      type: object
+      properties:
+        comment:
+          type: string
+          minLength: 1
+          maxLength: 300
+          example: "Отлично организованное мероприятие!"
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+      required: [ comment, rating ]
+
+    ReviewPatch:
+      type: object
+      description: Все поля опциональны
+      properties:
+        comment:
+          type: string
+          minLength: 1
+          maxLength: 300
+          example: "Обновлённый комментарий"
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 4
+
+    IdResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "6838a509c88c466b1142d79f"
+      required: [ id ]
+
+    UsersListResponse:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserPublic'
+        count:
+          type: integer
+          example: 1
+      required: [ users, count ]
+
+    EventsListResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        count:
+          type: integer
+          example: 0
+      required: [ events, count ]
+
+    ReviewsListResponse:
+      type: object
+      properties:
+        reviews:
+          type: array
+          items:
+            $ref: '#/components/schemas/Review'
+        count:
+          type: integer
+          example: 1
+      required: [ reviews, count ]
+
+  parameters:
+
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 20
+      description: Максимальное количество элементов в ответе
+
+    OffsetParam:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      description: пагинация
+
+    IncludeParam:
+      name: include
+      in: query
+      schema:
+        type: string
+        example: "reactions,reviews"
+      description: реакции и/или отзывы
+
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: X-Session-Id
+      description: |
+        HttpOnly-cookie, выставляемый при `POST /session`, `POST /users` или `POST /auth/login`.
+        Передаётся браузером автоматически. При использовании Postman сохраните cookie после
+        первого запроса к `/session`.
+
+paths:
+
+  /health:
+    get:
+      tags: [ Health ]
+      summary: Проверка состояния gateway
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Сервис доступен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+              example:
+                status: "ok"
+
+  /session:
+    post:
+      tags: [ Session ]
+      summary: Создать или обновить анонимную сессию
+      operationId: createSession
+      description: |
+        Если клиент передаёт валидный cookie `X-Session-Id` — TTL продлевается.
+        Иначе создаётся новая анонимная сессия.
+      responses:
+        '201':
+          description: Новая сессия создана
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "X-Session-Id=abcdef1234567890; HttpOnly"
+        '200':
+          description: Существующая сессия продлена
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "X-Session-Id=abcdef1234567890; HttpOnly"
+
+  /users:
+    post:
+      tags: [ Users ]
+      summary: Зарегистрировать пользователя
+      operationId: createUser
+      description: |
+        Создаёт пользователя и автоматически привязывает новую сессию к аккаунту.
+        Пароль хранится в виде BCrypt-хэша.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+            example:
+              full_name: "Alice Example"
+              username: "alice"
+              password: "secret123"
+      responses:
+        '201':
+          description: Пользователь создан. Тело ответа пустое — пользователь идентифицируется через cookie сессии.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "X-Session-Id=abcdef1234567890; HttpOnly; Path=/; Max-Age=60"
+        '400':
+          description: Невалидные поля запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "bad request"
+        '409':
+          description: Пользователь с таким username уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "user already exists"
+
+    get:
+      tags: [ Users ]
+      summary: Список пользователей
+      operationId: listUsers
+      parameters:
+        - name: id
+          in: query
+          schema:
+            type: string
+          description: Фильтр по ID пользователя
+        - name: name
+          in: query
+          schema:
+            type: string
+          description: Фильтр по имени
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Список пользователей с общим количеством
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersListResponse'
+              example:
+                users:
+                  - id: "6838a509c88c466b1142d79f"
+                    full_name: "Alice Example"
+                    username: "alice"
+                count: 1
+
+  /users/{id}:
+    get:
+      tags: [ Users ]
+      summary: Профиль пользователя
+      operationId: getUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a509c88c466b1142d79f"
+      responses:
+        '200':
+          description: Данные пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPublic'
+              example:
+                id: "6838a509c88c466b1142d79f"
+                full_name: "Alice Example"
+                username: "alice"
+        '404':
+          description: Пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Not found"
+
+  /users/{id}/events:
+    get:
+      tags: [ Users ]
+      summary: События, созданные пользователем
+      operationId: listUserEvents
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a509c88c466b1142d79f"
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/IncludeParam'
+      responses:
+        '200':
+          description: Список событий пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsListResponse'
+        '404':
+          description: Пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "User not found"
+
+  /auth/login:
+    post:
+      tags: [ Auth ]
+      summary: Войти в систему
+      operationId: login
+      description: |
+        Если у клиента уже есть валидная анонимная сессия, она привязывается к аккаунту.
+        Иначе создаётся новая аутентифицированная сессия.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: "alice"
+              password: "secret123"
+      responses:
+        '204':
+          description: Успешный вход
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "X-Session-Id=abcdef1234567890; HttpOnly"
+        '400':
+          description: Невалидные поля запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Неверные учётные данные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "invalid credentials"
+
+  /auth/logout:
+    post:
+      tags: [ Auth ]
+      summary: Выйти из системы
+      operationId: logout
+      security:
+        - sessionCookie: [ ]
+      responses:
+        '204':
+          description: Успешный выход
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "X-Session-Id=; Max-Age=0; HttpOnly"
+        '401':
+          description: Пользователь не авторизован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Unauthorized"
+
+  /events:
+    post:
+      tags: [ Events ]
+      summary: Создать событие
+      operationId: createEvent
+      security:
+        - sessionCookie: [ ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventCreate'
+            example:
+              title: "NoSQL Meetup"
+              address: "Kronverkskiy prospekt 49"
+              started_at: "2030-01-15T18:00:00Z"
+              finished_at: "2030-01-15T21:00:00Z"
+              description: "Talks and networking"
+      responses:
+        '201':
+          description: Событие создано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdResponse'
+              example:
+                id: "6838a60123ad784ab518de0b"
+        '400':
+          description: Невалидные поля
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Требуется авторизованная сессия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Unauthorized"
+        '409':
+          description: Событие с таким названием уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "event already exists"
+
+    get:
+      tags: [ Events ]
+      summary: Список событий
+      operationId: listEvents
+      parameters:
+        - name: id
+          in: query
+          schema:
+            type: string
+          description: Фильтр по ID события
+        - name: title
+          in: query
+          schema:
+            type: string
+          description: Фильтр по названию
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [ meetup, concert, exhibition, party, other ]
+          description: Фильтр по категории
+        - name: city
+          in: query
+          schema:
+            type: string
+          description: Фильтр по городу
+        - name: user_id
+          in: query
+          schema:
+            type: string
+          description: Фильтр по ID организатора
+        - name: user
+          in: query
+          schema:
+            type: string
+          description: Точное совпадение по username организатора
+        - name: address
+          in: query
+          schema:
+            type: string
+          description: Частичное совпадение по адресу
+        - name: price_from
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+          description: Минимальная цена
+        - name: price_to
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+          description: Максимальная цена
+        - name: date_from
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{8}$'
+          description: Дата начала (YYYYMMDD)
+          example: "20300101"
+        - name: date_to
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{8}$'
+          description: Дата конца (YYYYMMDD)
+          example: "20301231"
+        - name: started_date_from
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{8}$'
+          description: Алиас date_from
+        - name: started_date_to
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{8}$'
+          description: Алиас date_to
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/IncludeParam'
+      responses:
+        '200':
+          description: Список событий
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsListResponse'
+              example:
+                events:
+                  - id: "6838a60123ad784ab518de0b"
+                    title: "NoSQL Meetup"
+                    category: "meetup"
+                    price: 1500
+                    description: "Talks and networking"
+                    location:
+                      city: "Saint Petersburg"
+                      address: "Kronverkskiy prospekt 49"
+                    created_at: "2026-05-29T16:35:18.925Z"
+                    created_by: "6838a509c88c466b1142d79f"
+                    started_at: "2030-01-15T18:00:00Z"
+                    finished_at: "2030-01-15T21:00:00Z"
+                    reactions:
+                      likes: 12
+                      dislikes: 2
+                    reviews:
+                      count: 5
+                      rating: 4.6
+                count: 1
+        '400':
+          description: Невалидные параметры запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /events/{id}:
+    get:
+      tags: [ Events ]
+      summary: Карточка события
+      operationId: getEvent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+        - $ref: '#/components/parameters/IncludeParam'
+      responses:
+        '200':
+          description: Данные события
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+              example:
+                id: "6838a60123ad784ab518de0b"
+                title: "NoSQL Meetup"
+                category: "meetup"
+                price: 1500
+                description: "Talks and networking"
+                location:
+                  city: "Saint Petersburg"
+                  address: "Kronverkskiy prospekt 49"
+                created_at: "2026-05-29T16:35:18.925Z"
+                created_by: "6838a509c88c466b1142d79f"
+                started_at: "2030-01-15T18:00:00Z"
+                finished_at: "2030-01-15T21:00:00Z"
+                reactions:
+                  likes: 12
+                  dislikes: 2
+                reviews:
+                  count: 5
+                  rating: 4.6
+        '404':
+          description: Событие не найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Not found"
+
+    patch:
+      tags: [ Events ]
+      summary: Обновить событие
+      operationId: patchEvent
+      description: Только организатор может изменить событие.
+      security:
+        - sessionCookie: [ ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventPatch'
+            example:
+              category: "meetup"
+              price: 1500
+              city: "Saint Petersburg"
+      responses:
+        '204':
+          description: Событие обновлено
+        '400':
+          description: Невалидные поля
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Событие не найдено или пользователь не является организатором
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Not found. Be sure that event exists and you are the organizer"
+
+  /events/{id}/like:
+    post:
+      tags: [ Events ]
+      summary: Поставить лайк событию
+      operationId: likeEvent
+      security:
+        - sessionCookie: [ ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+      responses:
+        '204':
+          description: Лайк поставлен
+        '401':
+          description: Требуется авторизованная сессия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Событие не найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Event not found"
+
+  /events/{id}/dislike:
+    post:
+      tags: [ Events ]
+      summary: Поставить дизлайк событию
+      operationId: dislikeEvent
+      security:
+        - sessionCookie: [ ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+      responses:
+        '204':
+          description: Дизлайк поставлен
+        '401':
+          description: Требуется авторизованная сессия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Событие не найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Event not found"
+
+  /events/{event_id}/reviews:
+    post:
+      tags: [ Reviews ]
+      summary: Создать отзыв
+      operationId: createReview
+      description: |
+        Один пользователь может оставить только один отзыв на одно событие.
+        Данные сохраняются в Cassandra.
+      security:
+        - sessionCookie: [ ]
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewCreate'
+            example:
+              comment: "Отлично организованное мероприятие!"
+              rating: 5
+      responses:
+        '201':
+          description: Отзыв создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdResponse'
+              example:
+                id: "f5a08ebf-f3cb-4f88-9739-18f2950bff16"
+        '400':
+          description: Невалидные поля
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Требуется авторизованная сессия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Событие не найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Event not found"
+        '409':
+          description: Отзыв уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Already exists"
+
+    get:
+      tags: [ Reviews ]
+      summary: Список отзывов события
+      operationId: listReviews
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Список отзывов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewsListResponse'
+              example:
+                reviews:
+                  - id: "f5a08ebf-f3cb-4f88-9739-18f2950bff16"
+                    event_id: "6838a60123ad784ab518de0b"
+                    comment: "Отлично организованное мероприятие!"
+                    created_at: "2026-05-29T16:37:15.086Z"
+                    updated_at: "2026-05-29T16:37:15.086Z"
+                    created_by: "6838a509c88c466b1142d79f"
+                    rating: 5
+                count: 1
+        '400':
+          description: Невалидные параметры
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /events/{event_id}/reviews/{review_id}:
+    patch:
+      tags: [ Reviews ]
+      summary: Обновить отзыв
+      operationId: patchReview
+      description: Только автор отзыва может его изменить.
+      security:
+        - sessionCookie: [ ]
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "6838a60123ad784ab518de0b"
+        - name: review_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "f5a08ebf-f3cb-4f88-9739-18f2950bff16"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewPatch'
+            example:
+              comment: "Обновлённый комментарий"
+              rating: 4
+      responses:
+        '204':
+          description: Отзыв обновлён
+        '400':
+          description: Невалидные поля
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Событие или отзыв не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Event not found"
+
+  /recommendations:
+    get:
+      tags: [ Recommendations ]
+      summary: Персональные рекомендации
+      operationId: getRecommendations
+      description: |
+        Возвращает события, рекомендованные на основе коллаборативной фильтрации в Neo4j.
+        Алгоритм: "пользователи, которым понравились те же события, также лайкнули"
+        Результат кэшируется в Redis с TTL = `APP_RECOMMENDATIONS_TTL`.
+      security:
+        - sessionCookie: [ ]
+      responses:
+        '200':
+          description: Список рекомендованных событий
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsListResponse'
+              example:
+                events:
+                  - id: "6838a70023ad784ab518de0c"
+                    title: "Data Engineering Conference"
+                    category: "other"
+                    location:
+                      city: "Moscow"
+                      address: "Skolkovo Innovation Center"
+                    created_at: "2026-05-30T10:00:00.000Z"
+                    created_by: "6838b509c88c466b1142d7a0"
+                    started_at: "2030-03-10T09:00:00Z"
+                    finished_at: "2030-03-10T18:00:00Z"
+                count: 1
+        '401':
+          description: Требуется авторизованная сессия
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                message: "Unauthorized"

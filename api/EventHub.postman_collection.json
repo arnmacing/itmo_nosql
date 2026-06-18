@@ -1,0 +1,1269 @@
+{
+  "info": {
+    "_postman_id": "b2f8c3a1-4d5e-4f6a-9b7c-8e9d0f1a2b3c",
+    "name": "EventHub NoSQL",
+    "description": "Полная коллекция запросов к EventHub API.\n\nПорядок запуска:\n1. Session -> Create Session\n2. Users -> Register User\n3. Events -> Create Event\n4. Events -> Like Event\n5. Reviews -> Create Review\n6. Recommendations -> Get Recommendations\n\nПеременная `base_url` по умолчанию = http://localhost:8080",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "event_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "review_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Проверка доступности gateway"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/health"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"status\": \"ok\"}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Session",
+      "item": [
+        {
+          "name": "Create Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Session created', function() {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/session",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "session"
+              ]
+            },
+            "description": "Создаёт анонимную сессию или продлевает существующую. Cookie X-Session-Id устанавливается автоматически."
+          },
+          "response": [
+            {
+              "name": "201 Created — новая сессия",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/session"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "text",
+              "header": [
+                {
+                  "key": "Set-Cookie",
+                  "value": "X-Session-Id=abcdef1234567890abcdef1234567890; HttpOnly"
+                }
+              ],
+              "body": ""
+            },
+            {
+              "name": "200 OK — сессия продлена",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/session"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "text",
+              "header": [
+                {
+                  "key": "Set-Cookie",
+                  "value": "X-Session-Id=abcdef1234567890abcdef1234567890; HttpOnly"
+                }
+              ],
+              "body": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Register User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('User registered (201)', function() {",
+                  "  pm.expect(pm.response.code).to.equal(201);",
+                  "  // Response body is empty — user is identified by the session cookie",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Alice Example\",\n  \"username\": \"alice\",\n  \"password\": \"secret123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/users",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users"
+              ]
+            },
+            "description": "Регистрирует нового пользователя. Пароль хэшируется BCrypt. Cookie сессии устанавливается автоматически."
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/users"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"full_name\": \"Alice Example\", \"username\": \"alice\", \"password\": \"secret123\"}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "text",
+              "header": [
+                {
+                  "key": "Set-Cookie",
+                  "value": "X-Session-Id=abcdef1234567890abcdef1234567890; HttpOnly; Path=/; Max-Age=60"
+                }
+              ],
+              "body": ""
+            },
+            {
+              "name": "409 Conflict — пользователь уже существует",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/users"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"full_name\": \"Alice Example\", \"username\": \"alice\", \"password\": \"secret123\"}"
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"user already exists\"}"
+            }
+          ]
+        },
+        {
+          "name": "List Users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users?limit=10&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "id",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "name",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Список пользователей с пагинацией. Фильтрация по id или name"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/users?limit=10&offset=0"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"users\": [\n    {\n      \"id\": \"6838a509c88c466b1142d79f\",\n      \"full_name\": \"Alice Example\",\n      \"username\": \"alice\"\n    }\n  ],\n  \"count\": 1\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get User by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}"
+              ]
+            },
+            "description": "Профиль пользователя по ID"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/users/6838a509c88c466b1142d79f"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"6838a509c88c466b1142d79f\",\n  \"full_name\": \"Alice Example\",\n  \"username\": \"alice\"\n}"
+            },
+            {
+              "name": "404 Not Found",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/users/nonexistent"
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"Not found\"}"
+            }
+          ]
+        },
+        {
+          "name": "List User Events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/events?include=reactions,reviews",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "include",
+                  "value": "reactions,reviews"
+                },
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Все события, созданные пользователем"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/users/6838a509c88c466b1142d79f/events"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"events\": [], \"count\": 0}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Login successful', function() {",
+                  "  pm.expect(pm.response.code).to.equal(204);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"alice\",\n  \"password\": \"secret123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Аутентификация по username/password. Привязывает анонимную сессию к пользователю."
+          },
+          "response": [
+            {
+              "name": "204 No Content — успешный вход",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/auth/login"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"username\": \"alice\", \"password\": \"secret123\"}"
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_previewlanguage": "text",
+              "header": [
+                {
+                  "key": "Set-Cookie",
+                  "value": "X-Session-Id=abcdef1234567890abcdef1234567890; HttpOnly"
+                }
+              ],
+              "body": ""
+            },
+            {
+              "name": "401 Unauthorized — неверные данные",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/auth/login"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"username\": \"alice\", \"password\": \"wrong\"}"
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"invalid credentials\"}"
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Выход из системы. Требует авторизованную сессию."
+          },
+          "response": [
+            {
+              "name": "204 No Content — успешный выход",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/auth/logout"
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_previewlanguage": "text",
+              "header": [
+                {
+                  "key": "Set-Cookie",
+                  "value": "X-Session-Id=; Max-Age=0; HttpOnly"
+                }
+              ],
+              "body": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "Create Event",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('event_id', body.id);",
+                  "  pm.test('Event created, id saved', function() {",
+                  "    pm.expect(body.id).to.be.a('string');",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"NoSQL Meetup\",\n  \"address\": \"Kronverkskiy prospekt 49\",\n  \"started_at\": \"2030-01-15T18:00:00Z\",\n  \"finished_at\": \"2030-01-15T21:00:00Z\",\n  \"description\": \"Talks and networking\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/events",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events"
+              ]
+            },
+            "description": "Создаёт событие. Требует авторизованную сессию"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"title\": \"NoSQL Meetup\", \"address\": \"Kronverkskiy prospekt 49\", \"started_at\": \"2030-01-15T18:00:00Z\", \"finished_at\": \"2030-01-15T21:00:00Z\"}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"id\": \"6838a60123ad784ab518de0b\"}"
+            },
+            {
+              "name": "401 Unauthorized",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events"
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"Unauthorized\"}"
+            },
+            {
+              "name": "409 Conflict — событие уже существует",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events"
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"event already exists\"}"
+            }
+          ]
+        },
+        {
+          "name": "List Events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events?include=reactions,reviews&limit=10&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "title",
+                  "value": "",
+                  "disabled": true,
+                  "description": "частичное совпадение"
+                },
+                {
+                  "key": "category",
+                  "value": "",
+                  "disabled": true,
+                  "description": "meetup|concert|exhibition|party|other"
+                },
+                {
+                  "key": "city",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "user_id",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "user",
+                  "value": "",
+                  "disabled": true,
+                  "description": "точное совпадение username"
+                },
+                {
+                  "key": "address",
+                  "value": "",
+                  "disabled": true,
+                  "description": "частичное совпадение"
+                },
+                {
+                  "key": "price_from",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "price_to",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "date_from",
+                  "value": "",
+                  "disabled": true,
+                  "description": "YYYYMMDD"
+                },
+                {
+                  "key": "date_to",
+                  "value": "",
+                  "disabled": true,
+                  "description": "YYYYMMDD"
+                },
+                {
+                  "key": "include",
+                  "value": "reactions,reviews"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Список событий с фильтрацией и пагинацией"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/events?include=reactions,reviews"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"events\": [\n    {\n      \"id\": \"6838a60123ad784ab518de0b\",\n      \"title\": \"NoSQL Meetup\",\n      \"category\": \"meetup\",\n      \"price\": 1500,\n      \"description\": \"Talks and networking\",\n      \"location\": {\n        \"city\": \"Saint Petersburg\",\n        \"address\": \"Kronverkskiy prospekt 49\"\n      },\n      \"created_at\": \"2026-05-29T16:35:18.925Z\",\n      \"created_by\": \"6838a509c88c466b1142d79f\",\n      \"started_at\": \"2030-01-15T18:00:00Z\",\n      \"finished_at\": \"2030-01-15T21:00:00Z\",\n      \"reactions\": {\"likes\": 12, \"dislikes\": 2},\n      \"reviews\": {\"count\": 5, \"rating\": 4.6}\n    }\n  ],\n  \"count\": 1\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Event by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}?include=reactions,reviews",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}"
+              ],
+              "query": [
+                {
+                  "key": "include",
+                  "value": "reactions,reviews"
+                }
+              ]
+            },
+            "description": "Карточка события по ID. Параметр include=reactions,reviews добавляет счётчики."
+          },
+          "response": [
+            {
+              "name": "200 OK — с реакциями и отзывами",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b?include=reactions,reviews"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"6838a60123ad784ab518de0b\",\n  \"title\": \"NoSQL Meetup\",\n  \"category\": \"meetup\",\n  \"price\": 1500,\n  \"description\": \"Talks and networking\",\n  \"location\": {\n    \"city\": \"Saint Petersburg\",\n    \"address\": \"Kronverkskiy prospekt 49\"\n  },\n  \"created_at\": \"2026-05-29T16:35:18.925Z\",\n  \"created_by\": \"6838a509c88c466b1142d79f\",\n  \"started_at\": \"2030-01-15T18:00:00Z\",\n  \"finished_at\": \"2030-01-15T21:00:00Z\",\n  \"reactions\": {\"likes\": 12, \"dislikes\": 2},\n  \"reviews\": {\"count\": 5, \"rating\": 4.6}\n}"
+            },
+            {
+              "name": "404 Not Found",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/events/nonexistent"
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"Not found\"}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('user_id', body.created_by);",
+                  "  pm.test('Event found, user_id saved from created_by', function() {",
+                  "    pm.expect(body.id).to.be.a('string');",
+                  "    pm.expect(body.created_by).to.be.a('string');",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patch Event",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"meetup\",\n  \"price\": 1500,\n  \"city\": \"Saint Petersburg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}"
+              ]
+            },
+            "description": "Обновляет категорию, цену или город события. Только для организатора"
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "PATCH",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"category\": \"meetup\", \"price\": 1500}"
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_previewlanguage": "text",
+              "header": [],
+              "body": ""
+            },
+            {
+              "name": "404 Not Found — не организатор",
+              "originalRequest": {
+                "method": "PATCH",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b"
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"Not found. Be sure that event exists and you are the organizer\"}"
+            }
+          ]
+        },
+        {
+          "name": "Like Event",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}/like",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}",
+                "like"
+              ]
+            },
+            "description": "Ставит лайк событию. Требует авторизованную сессию. Повторный вызов перезаписывает предыдущую реакцию."
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b/like"
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_previewlanguage": "text",
+              "header": [],
+              "body": ""
+            }
+          ]
+        },
+        {
+          "name": "Dislike Event",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}/dislike",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}",
+                "dislike"
+              ]
+            },
+            "description": "Ставит дизлайк событию. Требует авторизованную сессию."
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b/dislike"
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_previewlanguage": "text",
+              "header": [],
+              "body": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Reviews",
+      "item": [
+        {
+          "name": "Create Review",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('review_id', body.id);",
+                  "  pm.test('Review created, id saved', function() {",
+                  "    pm.expect(body.id).to.be.a('string');",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"comment\": \"Отлично организованное мероприятие!\",\n  \"rating\": 5\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}/reviews",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}",
+                "reviews"
+              ]
+            },
+            "description": "Создаёт отзыв. Требует авторизованную сессию. Один пользователь - один отзыв на событие"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b/reviews"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"comment\": \"Отлично!\", \"rating\": 5}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"id\": \"f5a08ebf-f3cb-4f88-9739-18f2950bff16\"}"
+            },
+            {
+              "name": "409 Conflict — уже есть отзыв",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b/reviews"
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"Already exists\"}"
+            }
+          ]
+        },
+        {
+          "name": "List Reviews",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}/reviews?limit=10&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}",
+                "reviews"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Список отзывов с пагинацией"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b/reviews"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"reviews\": [\n    {\n      \"id\": \"f5a08ebf-f3cb-4f88-9739-18f2950bff16\",\n      \"event_id\": \"6838a60123ad784ab518de0b\",\n      \"comment\": \"Отлично организованное мероприятие!\",\n      \"created_at\": \"2026-05-29T16:37:15.086Z\",\n      \"updated_at\": \"2026-05-29T16:37:15.086Z\",\n      \"created_by\": \"6838a509c88c466b1142d79f\",\n      \"rating\": 5\n    }\n  ],\n  \"count\": 1\n}"
+            }
+          ]
+        },
+        {
+          "name": "Patch Review",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"comment\": \"Обновлённый комментарий\",\n  \"rating\": 4\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/events/{{event_id}}/reviews/{{review_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "events",
+                "{{event_id}}",
+                "reviews",
+                "{{review_id}}"
+              ]
+            },
+            "description": "Обновляет отзыв. Только автор может изменить свой отзыв"
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "PATCH",
+                "url": {
+                  "raw": "{{base_url}}/events/6838a60123ad784ab518de0b/reviews/f5a08ebf-f3cb-4f88-9739-18f2950bff16"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"rating\": 4}"
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_previewlanguage": "text",
+              "header": [],
+              "body": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Recommendations",
+      "item": [
+        {
+          "name": "Get Recommendations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/recommendations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "recommendations"
+              ]
+            },
+            "description": "Персональные рекомендации на основе коллаборативной фильтрации. Требует авторизованную сессию. Результат кэшируется в Redis."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/recommendations"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"events\": [\n    {\n      \"id\": \"6838a70023ad784ab518de0c\",\n      \"title\": \"Data Engineering Conference\",\n      \"category\": \"other\",\n      \"location\": {\n        \"city\": \"Moscow\",\n        \"address\": \"Skolkovo Innovation Center\"\n      },\n      \"created_at\": \"2026-05-30T10:00:00.000Z\",\n      \"created_by\": \"6838b509c88c466b1142d7a0\",\n      \"started_at\": \"2030-03-10T09:00:00Z\",\n      \"finished_at\": \"2030-03-10T18:00:00Z\"\n    }\n  ],\n  \"count\": 1\n}"
+            },
+            {
+              "name": "401 Unauthorized",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/recommendations"
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\"message\": \"Unauthorized\"}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
