@@ -468,6 +468,12 @@ make clean      # остановить + удалить volumes
 
 ## Тестирование
 
+### Автотесты в GitHub Actions
+
+Автотесты запускаются автоматически в GitHub Actions для каждой лабораторной работы через workflow [`EventHub`](.github/workflows/eventhub.yml). Workflow читает номер текущей лабораторной из `.labrc` и передаёт его в общий autograder `sitnikovik/ndbx`.
+
+Все автотесты пройдены.
+
 ### Запуск тестов вручную
 
 В проекте есть shell-скрипт для smoke-тестирования через `curl`:
